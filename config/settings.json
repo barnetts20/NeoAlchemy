@@ -1,0 +1,10 @@
+{
+  "symbols": ["AAPL", "MSFT", "NVDA"],
+  "strategy": "simple_ma",
+  "interval": "1h",
+  "paper": true,
+  "db": {
+    "host": "localhost",
+    "port": 5432
+  }
+}
