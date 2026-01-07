@@ -14,3 +14,6 @@ def test_get_account_data():
     assert "cash" in data
     assert "equity" in data
     logger.info("Account data test passed.")
+    
+
+    

@@ -6,10 +6,26 @@
 -- 1. Assets table
 -- -------------------------
 CREATE TABLE IF NOT EXISTS assets (
-    symbol TEXT PRIMARY KEY,
-    name TEXT
+    asset_id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL UNIQUE,        -- "AAPL", "BTC/USD"
+    asset_type TEXT NOT NULL,            -- 'stock' | 'crypto'
+    name TEXT,                           -- Optional display name
+    exchange TEXT,                       -- NASDAQ, NYSE, CRYPTO, etc
+    currency TEXT,                       -- USD, USDT, etc (useful later)
+    tradable BOOLEAN DEFAULT TRUE,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+ALTER TABLE assets
+ADD CONSTRAINT asset_type_check
+CHECK (asset_type IN ('stock', 'crypto'));
+INSERT INTO assets (symbol, asset_type, name, exchange, currency)
+VALUES
+  ('AAPL', 'stock', 'Apple Inc', 'NASDAQ', 'USD'),
+  ('VGT', 'stock', 'Vanguard Tech ETF', 'NASDAQ', 'USD'),
+  ('BTC/USD', 'crypto', 'Bitcoin', 'ALPACA', 'USD');
 -- -------------------------
 -- 2. 1-minute OHLCV bars
 -- -------------------------
