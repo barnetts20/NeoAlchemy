@@ -63,7 +63,24 @@ class LiveAlpacaBroker(BaseBroker):
 
     def get_open_position(self, symbol: str):
         symbol = symbol.replace("/", "")
-        return self.client.get_open_position(symbol).model_dump()
+        try:
+            return self.client.get_open_position(symbol).model_dump()
+        except Exception as e:
+            # Position doesn't exist - return empty position dict
+            if "does not exist" in str(e) or "40410000" in str(e):
+                return {
+                    "symbol": symbol,
+                    "qty": "0",
+                    "side": "long",
+                    "market_value": "0",
+                    "cost_basis": "0",
+                    "unrealized_pl": "0",
+                    "unrealized_plpc": "0",
+                    "current_price": "0",
+                    "avg_entry_price": "0"
+                }
+            # Re-raise if it's a different error
+            raise
 
     def close_all_positions(self, cancel_orders=True):
         return [r.model_dump() for r in self.client.close_all_positions(cancel_orders=cancel_orders)]

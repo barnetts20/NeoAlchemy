@@ -3,6 +3,7 @@ import sys
 import json
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient, OptionHistoricalDataClient
+from alpaca.data.live import CryptoDataStream, StockDataStream
 
 # Project root directory
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
@@ -21,16 +22,34 @@ with open(SETTINGS_PATH) as f:
 with open(SECRETS_PATH) as f:
     SECRETS = json.load(f)
 
-if SETTINGS["paper"]:
-    paper_account_key = "alpaca_paper"
-    TRADING_CLIENT = TradingClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
-    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
-    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
-else:
-    live_account_key = "alpaca"
-    TRADING_CLIENT = TradingClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
-    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
-    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
+# Determine which account to use
+isPaper = SETTINGS["paper"]
 
+account_key = "alpaca_paper" if isPaper else "alpaca"
+api_key = SECRETS[account_key]["api_key"]
+secret_key = SECRETS[account_key]["secret_key"]
+
+TRADING_CLIENT = TradingClient(
+    api_key, 
+    secret_key,
+    paper=isPaper
+)
+STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(
+    api_key, 
+    secret_key
+)
+STOCK_LIVE_DATA_STREAM = StockDataStream(
+    api_key, 
+    secret_key
+)
+OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(
+    api_key, 
+    secret_key
+)
+
+CRYPTO_LIVE_DATA_STREAM = CryptoDataStream(
+    api_key,
+    secret_key
+)
+# Crypto clients don't need credentials (free tier)
 CRYPTO_HISTORIC_DATA_CLIENT = CryptoHistoricalDataClient()
-
