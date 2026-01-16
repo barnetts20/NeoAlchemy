@@ -22,13 +22,15 @@ with open(SECRETS_PATH) as f:
     SECRETS = json.load(f)
 
 if SETTINGS["paper"]:
-    TRADING_CLIENT = TradingClient(SECRETS["alpaca-paper"]["api_key"], SECRETS["alpaca-paper"]["secret_key"])
-    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS["alpaca-paper"]["api_key"], SECRETS["alpaca-paper"]["secret_key"])
-    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS["alpaca-paper"]["api_key"], SECRETS["alpaca-paper"]["secret_key"])
+    paper_account_key = "alpaca_paper"
+    TRADING_CLIENT = TradingClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
+    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
+    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS[paper_account_key]["api_key"], SECRETS[paper_account_key]["secret_key"])
 else:
-    TRADING_CLIENT = TradingClient(SECRETS["alpaca"]["api_key"], SECRETS["alpaca"]["secret_key"])
-    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS["alpaca"]["api_key"], SECRETS["alpaca"]["secret_key"])
-    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS["alpaca"]["api_key"], SECRETS["alpaca"]["secret_key"])
+    live_account_key = "alpaca"
+    TRADING_CLIENT = TradingClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
+    STOCK_HISTORIC_DATA_CLIENT = StockHistoricalDataClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
+    OPTION_HISTORIC_DATA_CLIENT = OptionHistoricalDataClient(SECRETS[live_account_key]["api_key"], SECRETS[live_account_key]["secret_key"])
 
 CRYPTO_HISTORIC_DATA_CLIENT = CryptoHistoricalDataClient()
 
