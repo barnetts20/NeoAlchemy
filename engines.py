@@ -7,16 +7,16 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from alpaca.data.models import Bar
 
-from agents import ConsecutiveChangeAgent
+from agents import CryptoAgent
 from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
-from strategies import ConsecutiveChangeStrategy
+from strategies import ConsecutiveChangeStrategy, VWAPReversionStrategy
 from psycopg import AsyncConnection
 from logger import logger
 
 
 class BacktestEngine:
-    def __init__(self, broker, agent, window_size=10):
+    def __init__(self, broker, agent, window_size=20):
         self.broker = broker  # The LocalSimBroker instance
         self.agent = agent    # The ConsecutiveChangeAgent instance
         self.window_size = window_size
@@ -61,10 +61,10 @@ class LiveEngine:
     def __init__(
         self,
         broker: LiveAlpacaBroker,
-        agent: ConsecutiveChangeAgent,
+        agent: CryptoAgent,
         symbols: List[str],
         asset_type: str = "crypto",  # "stock" or "crypto"
-        window_size: int = 10,
+        window_size: int = 20,
     ):
         self.broker = broker
         self.agent = agent
@@ -97,7 +97,6 @@ class LiveEngine:
         
         # Subscribe to bars for all symbols
         self.stream.subscribe_bars(self._on_bar, *self.symbols)
-        
         self.is_running = True
         
         # Log initial account status
@@ -130,7 +129,7 @@ class LiveEngine:
         # Log the incoming bar (no emojis for Windows compatibility)
         logger.info(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.2f}, volume={bar.volume:.4f}, "
+            f"close=${bar.close:.4f}, volume={bar.volume:.8f}, "
             f"time={bar.timestamp}"
         )
         
@@ -193,18 +192,21 @@ class LiveEngine:
                     account = self.broker.get_account()
                     positions = self.broker.get_all_positions()
                     
+                    # Convert string values to float for formatting
+                    equity = float(account.get('equity', 0))
+                    
                     logger.info("=" * 60)
                     logger.info(
                         f"PORTFOLIO [{symbol}] Price: ${current_price:.2f} | "
-                        f"Equity: ${float(account.get('equity', 0)):,.2f} | "
+                        f"Equity: ${equity:,.2f} | "
                         f"Positions: {len(positions)}"
                     )
                     
                     if positions:
                         for pos in positions:
                             logger.info(
-                                f"  POSITION {pos['symbol']}: {pos['qty']} @ ${pos['current_price']:.2f} "
-                                f"(P&L: ${pos['unrealized_pl']:.2f})"
+                                f"  POSITION {pos['symbol']}: {float(pos['qty']):.6f} @ ${float(pos['current_price']):.2f} "
+                                f"(P&L: ${float(pos['unrealized_pl']):.2f})"
                             )
                     logger.info("=" * 60)
                     
@@ -240,17 +242,19 @@ class LiveEngine:
             logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
             logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
             logger.info(f"Open Positions: {len(positions)}")
-            
+
             if positions:
                 logger.info("\nPositions:")
                 for pos in positions:
                     logger.info(
                         f"  {pos['symbol']}: {pos['qty']} shares @ "
-                        f"${pos['current_price']:.2f} "
-                        f"(P&L: ${pos['unrealized_pl']:.2f})"
+                        f"${float(pos['current_price']):.2f} "
+                        f"(P&L: ${float(pos['unrealized_pl']):.2f})"
                     )
             
             logger.info("=" * 60)
+
+            self.broker.close_all_positions(True)
             
         except Exception as e:
             logger.error(f"Error getting final state: {e}")
@@ -300,7 +304,7 @@ async def run_standalone_backtest(asset_type="crypto"):
         symbols = await repo.get_active_symbols(asset_type)
         
         # Match these exactly to your table_map keys
-        timeframes = ["1D"]
+        timeframes = ["1M"]
         
         # results[symbol][timeframe] = final_equity
         matrix_results = {}
@@ -310,8 +314,8 @@ async def run_standalone_backtest(asset_type="crypto"):
             for tf in timeframes:
                 # 1. Fresh Start for every cell in the matrix
                 broker = LocalSimBroker(initial_cash=10000.0)
-                strategy = ConsecutiveChangeStrategy(parameters={})
-                agent = ConsecutiveChangeAgent(strategy) 
+                strategy = VWAPReversionStrategy(parameters={})
+                agent = CryptoAgent(strategy) 
                 engine = BacktestEngine(broker, agent)
 
                 try:
@@ -329,7 +333,12 @@ async def run_standalone_backtest(asset_type="crypto"):
                     # 4. Extract Result
                     final_equity = engine.results[symbol]['equity'].iloc[-1]
                     matrix_results[symbol][tf] = round(final_equity, 2)
-                    
+                    # Log signal summary
+                    logger.info(f"{symbol} - Total signals: {strategy.signals_generated}, BUY: {strategy.buy_signals}, SELL: {strategy.sell_signals}, HOLD: {strategy.signals_generated - strategy.buy_signals - strategy.sell_signals}")
+
+                    # 4. Extract Result
+                    final_equity = engine.results[symbol]['equity'].iloc[-1]
+
                 except Exception as e:
                     logger.error(f"Failed {symbol} @ {tf}: {e}")
                     matrix_results[symbol][tf] = "ERROR"
@@ -371,8 +380,8 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
     broker = LiveAlpacaBroker()
     
     # Initialize strategy and agent (same as backtest)
-    strategy = ConsecutiveChangeStrategy(parameters={})
-    agent = ConsecutiveChangeAgent(strategy)
+    strategy = VWAPReversionStrategy(parameters={})
+    agent = CryptoAgent(strategy)
     
     # Create live engine (will use streams from project_context)
     engine = LiveEngine(
@@ -380,7 +389,7 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
         agent=agent,
         symbols=symbols,
         asset_type=asset_type,
-        window_size=3
+        window_size=20
     )
     
     # Start the engine
@@ -398,7 +407,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "live":
         # Live trading mode
         asset_type = "crypto"  # Default to crypto
-        symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]  # Default crypto symbols
+        symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]  # Default crypto symbols
         
         if len(sys.argv) > 2:
             if sys.argv[2] == "stock":

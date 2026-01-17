@@ -6,18 +6,18 @@ LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger("alchemy")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 if not logger.hasHandlers():
     # Console handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(logging.DEBUG)
     ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(ch)
 
     # File handler
     fh = logging.FileHandler(os.path.join(LOG_DIR, "alchemy.log"))
-    fh.setLevel(logging.INFO)
+    fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(fh)
 
