@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime, timezone
 from typing import List, Dict
 from alpaca.data.models import Bar
-from agents import CryptoAgent
+from agents import BaseAgent, CryptoAgent
 from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
 from strategies import VWAPReversionStrategy
@@ -15,10 +15,10 @@ from logger import logger
 
 
 class BacktestEngine:
-    def __init__(self, broker, agent, window_size=2):
+    def __init__(self, broker, agent: BaseAgent):
         self.broker = broker  # The LocalSimBroker instance
-        self.agent = agent    # The ConsecutiveChangeAgent instance
-        self.window_size = window_size
+        self.agent = agent
+        self.window_size = agent.get_window_size()
         self.results = {}
 
     def run_backtest(self, symbol: str, df: pd.DataFrame):
@@ -72,14 +72,13 @@ class LiveCryptoEngine:
         broker: LiveAlpacaBroker,
         agent: CryptoAgent,
         symbols: List[str],
-        asset_type: str = "crypto",  # "stock" or "crypto"
-        window_size: int = 1,
+        asset_type: str = "crypto"
     ):
         self.broker = broker
         self.agent = agent
         self.symbols = symbols
         self.asset_type = asset_type
-        self.window_size = window_size
+        self.window_size = agent.get_window_size()
         
         # Get the appropriate stream from project_context (already initialized with credentials)
         if asset_type == "crypto":
@@ -415,8 +414,7 @@ async def run_live_crypto_trading(symbols: List[str], asset_type: str = "crypto"
         broker=broker,
         agent=agent,
         symbols=symbols,
-        asset_type=asset_type,
-        window_size=1
+        asset_type=asset_type
     )
     
     # Start the engine

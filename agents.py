@@ -13,6 +13,9 @@ class BaseAgent(ABC):
         """Standardized signature for both Backtesting and Live."""
         pass
 
+    def get_window_size(self) -> int:
+        return self.strategy.window_size
+
 class CryptoAgent(BaseAgent):
     def __init__(self, strategy: BaseStrategy, commitment: float = 0.5):
         super().__init__(strategy)
