@@ -414,7 +414,7 @@ if __name__ == "__main__":
                 symbols = sys.argv[2].split(",")
         
         try:
-            asyncio.run(run_live_trading(symbols, asset_type), loop_factory=loop_factory)
+            asyncio.run(run_live_trading(symbols, asset_type))
         except KeyboardInterrupt:
             logger.info("Live trading terminated by user.")
     else:
