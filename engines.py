@@ -4,13 +4,12 @@ import selectors
 import sys
 import pandas as pd
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict
 from alpaca.data.models import Bar
-
 from agents import CryptoAgent
 from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
-from strategies import ConsecutiveChangeStrategy, VWAPReversionStrategy
+from strategies import VWAPReversionStrategy
 from psycopg import AsyncConnection
 from logger import logger
 
@@ -62,7 +61,7 @@ class BacktestEngine:
         return self.results[symbol]
 
 
-class LiveEngine:
+class LiveCryptoEngine:
     """
     Live trading engine that streams real-time data from Alpaca
     and executes trades through LiveAlpacaBroker
@@ -394,7 +393,7 @@ async def run_standalone_backtest(asset_type="crypto"):
         print("="*65)
 
 
-async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
+async def run_live_crypto_trading(symbols: List[str], asset_type: str = "crypto"):
     """
     Run live paper trading with real-time data from Alpaca
     
@@ -412,7 +411,7 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
     agent = CryptoAgent(strategy)
     
     # Create live engine (will use streams from project_context)
-    engine = LiveEngine(
+    engine = LiveCryptoEngine(
         broker=broker,
         agent=agent,
         symbols=symbols,
@@ -448,9 +447,9 @@ if __name__ == "__main__":
         
         try:
             if loop:
-                loop.run_until_complete(run_live_trading(symbols, asset_type))
+                loop.run_until_complete(run_live_crypto_trading(symbols, asset_type))
             else:
-                asyncio.run(run_live_trading(symbols, asset_type))
+                asyncio.run(run_live_crypto_trading(symbols, asset_type))
         except KeyboardInterrupt:
             logger.info("Live trading terminated by user.")
         finally:

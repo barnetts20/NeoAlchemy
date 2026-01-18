@@ -57,22 +57,8 @@ class CryptoAgent(BaseAgent):
 
         # --- Logic: BUY Signal ---
         if signal == Signal.OPEN_LONG:
-            if qty_owned > 0:  # Check for ANY existing long position
+            if qty_owned > 0:
                 logger.debug(f"SIGNAL: OPEN_LONG but already have LONG position in {symbol} (qty: {qty_owned})")
-            elif qty_owned < 0:
-                logger.debug(f"SIGNAL: OPEN_LONG but already have SHORT position in {symbol} (qty: {qty_owned})")
-                logger.debug("CLOSING SHORT POSITION")
-                try:
-                    broker.submit_order(
-                        symbol=symbol,
-                        qty=abs(qty_owned),  # Use absolute value
-                        side=OrderSide.BUY,
-                        order_type=OrderType.MARKET,
-                        time_in_force=TimeInForce.GTC,
-                        current_price=current_price
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to close SHORT position for {symbol}: {e}", exc_info=True)
             else:
                 buy_qty = (available_cash * self.commitment) / current_price
                 if buy_qty > 0:
@@ -88,41 +74,6 @@ class CryptoAgent(BaseAgent):
                         )
                     except Exception as e:
                         logger.error(f"Failed to submit BUY order for {symbol}: {e}", exc_info=True)
-
-        # --- Logic: SHORT Signal (Currently unused - crypto shorting not supported) ---
-        # Keeping for potential future stock trading support
-        # elif signal == Signal.OPEN_SHORT:
-        #     if qty_owned < 0:  # Already short
-        #         logger.debug(f"SIGNAL: OPEN_SHORT but already have SHORT position in {symbol} (qty: {qty_owned})")
-        #     elif qty_owned > 0:  # Have long, close it
-        #         logger.info(f"SIGNAL: OPEN_SHORT but have LONG position in {symbol} (qty: {qty_owned})")
-        #         logger.info("CLOSING LONG POSITION")
-        #         try:
-        #             broker.submit_order(
-        #                 symbol=symbol,
-        #                 qty=qty_owned,
-        #                 side=OrderSide.SELL,
-        #                 order_type=OrderType.MARKET,
-        #                 time_in_force=TimeInForce.GTC,
-        #                 current_price=current_price
-        #             )
-        #         except Exception as e:
-        #             logger.error(f"Failed to close LONG position for {symbol}: {e}", exc_info=True)
-        #     else:  # qty_owned == 0, open short
-        #         sell_qty = (available_cash * self.commitment) / current_price
-        #         if sell_qty > 0:
-        #             logger.info(f"SIGNAL: OPEN_SHORT {float(sell_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(sell_qty * current_price):.2f})")
-        #             try:
-        #                 broker.submit_order(
-        #                     symbol=symbol,
-        #                     qty=sell_qty,
-        #                     side=OrderSide.SELL,
-        #                     order_type=OrderType.MARKET,
-        #                     time_in_force=TimeInForce.GTC,
-        #                     current_price=current_price
-        #                 )
-        #             except Exception as e:
-        #                 logger.error(f"Failed to submit SELL order for {symbol}: {e}", exc_info=True)
 
         # --- Logic: CLOSE LONG ---
         elif signal == Signal.CLOSE_LONG:
@@ -141,25 +92,13 @@ class CryptoAgent(BaseAgent):
                     )
                 except Exception as e:
                     logger.error(f"Failed to submit CLOSE_LONG order for {symbol}: {e}", exc_info=True)
-
-        # --- Logic: CLOSE SHORT (Currently unused - crypto shorting not supported) ---
-        # Keeping for potential future stock trading support
-        # elif signal == Signal.CLOSE_SHORT:
-        #     if qty_owned >= 0:
-        #         logger.debug(f"SIGNAL: CLOSE_SHORT but no short position in {symbol}")
-        #     else:
-        #         logger.info(f"SIGNAL: CLOSE_SHORT {float(abs(qty_owned)):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(abs(qty_owned) * current_price):.2f})")
-        #         try:
-        #             broker.submit_order(
-        #                 symbol=symbol,
-        #                 qty=abs(qty_owned),  # Use absolute value
-        #                 side=OrderSide.BUY,
-        #                 order_type=OrderType.MARKET,
-        #                 time_in_force=TimeInForce.GTC,
-        #                 current_price=current_price
-        #             )
-        #         except Exception as e:
-        #             logger.error(f"Failed to submit CLOSE_SHORT order for {symbol}: {e}", exc_info=True)
+        
+        # --- Logic: SHORT Signals (not supported for crypto) ---
+        elif signal == Signal.OPEN_SHORT:
+            logger.error(f"SIGNAL: OPEN_SHORT not supported for crypto trading on {symbol}")
+        
+        elif signal == Signal.CLOSE_SHORT:
+            logger.error(f"SIGNAL: CLOSE_SHORT not supported for crypto trading on {symbol}")
 
         # --- HOLD Signal ---
         else:
