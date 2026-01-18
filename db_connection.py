@@ -29,6 +29,5 @@ async def test_connection():
     await conn.close()
 
 asyncio.run(
-    test_connection(),
-    loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
+    test_connection()
 )
