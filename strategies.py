@@ -41,8 +41,8 @@ class VWAPReversionStrategy(BaseStrategy):
     def __init__(self, parameters=None):
         super().__init__(parameters)
         self.lookback = parameters.get('lookback', 2)  # How many bars to look back for valid VWAP
-        self.buy_threshold = parameters.get('buy_threshold', -0.0012)  # -0.8%
-        self.sell_threshold = parameters.get('sell_threshold', 0.0012)  # +0.8%
+        self.buy_threshold = parameters.get('buy_threshold', -0.0025)  # -0.8%
+        self.sell_threshold = parameters.get('sell_threshold', 0.0025)  # +0.8%
         self.signals_generated = 0
         self.buy_signals = 0
         self.sell_signals = 0
