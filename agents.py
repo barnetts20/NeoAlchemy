@@ -33,16 +33,16 @@ class CryptoAgent(BaseAgent):
         current_price = float(data['close'].iloc[-1])
 
         # --- Logic: BUY Signal ---
-        if signal == Signal.BUY:
+        if signal == Signal.OPEN_LONG:
             if qty_owned > 0:
                 # Already have position, do nothing
-                logger.debug(f"SIGNAL: BUY but already have position in {symbol}")
+                logger.debug(f"SIGNAL: OPEN_LONG but already have position in {symbol}")
             else:
                 # No position, enter long
                 buy_qty = (available_cash * self.commitment) / current_price
                 
                 if buy_qty > 0:
-                    logger.info(f"SIGNAL: BUY {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
+                    logger.info(f"SIGNAL: OPEN_LONG {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
                     
                     broker.submit_order(
                         symbol=symbol,
@@ -52,9 +52,29 @@ class CryptoAgent(BaseAgent):
                         time_in_force=TimeInForce.GTC,
                         current_price=current_price
                     )
-            
+
+        # --- Logic: SHORT Signal ---
+        if signal == Signal.OPEN_SHORT:
+            if qty_owned > 0:
+                # Already have position, do nothing
+                logger.debug(f"SIGNAL: OPEN_SHORT but already have position in {symbol}")
+            else:
+                # No position, enter long
+                buy_qty = (available_cash * self.commitment) / current_price
+                
+                if buy_qty > 0:
+                    logger.info(f"SIGNAL: OPEN_SHORT {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
+                    
+                    broker.submit_order(
+                        symbol=symbol,
+                        qty=buy_qty, 
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        time_in_force=TimeInForce.GTC,
+                        current_price=current_price
+                    )            
         # --- Logic: SELL Signal ---
-        elif signal == Signal.SELL:
+        elif signal == Signal.CLOSE_LONG:
             if qty_owned <= 0:
                 # No position to sell, do nothing
                 logger.debug(f"SIGNAL: SELL but no position in {symbol}")
@@ -70,7 +90,24 @@ class CryptoAgent(BaseAgent):
                     time_in_force=TimeInForce.GTC,
                     current_price=current_price
                 )
-        
+
+         # --- Logic: SELL Signal ---
+        elif signal == Signal.CLOSE_SHORT:
+            if qty_owned <= 0:
+                # No position to sell, do nothing
+                logger.debug(f"SIGNAL: CLOSE_SHORT but no position in {symbol}")
+            else:
+                # Have position, exit
+                logger.info(f"SIGNAL: CLOSE_SHORT {float(qty_owned):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(qty_owned * current_price):.2f})")
+                
+                broker.submit_order(
+                    symbol=symbol,
+                    qty=qty_owned,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC,
+                    current_price=current_price
+                )       
         # --- HOLD Signal ---
         else:
             logger.debug(f"SIGNAL: HOLD for {symbol}")

@@ -4,9 +4,11 @@ import pandas as pd
 from logger import logger
 
 class Signal(IntEnum):
-    SELL = -1
-    HOLD = 0
-    BUY = 1
+    CLOSE_SHORT = -2
+    CLOSE_LONG  = -1
+    HOLD        = 0
+    OPEN_LONG   = 1
+    OPEN_SHORT  = 2
 
 class BaseStrategy(ABC):
     def __init__(self, parameters: dict = None):
@@ -29,9 +31,9 @@ class ConsecutiveChangeStrategy(BaseStrategy):
         change2 = closes[2] - closes[1]
         
         if change1 > 0 and change2 > 0:
-            return Signal.BUY
+            return Signal.OPEN_LONG
         elif change1 < 0 and change2 < 0:
-            return Signal.SELL
+            return Signal.CLOSE_LONG
             
         return Signal.HOLD
     
@@ -73,12 +75,12 @@ class VWAPReversionStrategy(BaseStrategy):
         
         # Buy when price is below VWAP by threshold (undervalued)
         if distance_pct < self.buy_threshold:
-            signal = Signal.BUY
+            signal = Signal.OPEN_LONG
             self.buy_signals += 1
         
         # Sell when price is above VWAP by threshold (overvalued)
         elif distance_pct > self.sell_threshold:
-            signal = Signal.SELL
+            signal = Signal.CLOSE_LONG
             self.sell_signals += 1
         
         self.signals_generated += 1
