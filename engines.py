@@ -27,17 +27,19 @@ class BacktestEngine:
         # Validate input
         if df is None or len(df) == 0:
             raise ValueError(f"Empty dataframe provided for {symbol}")
-        if len(df) <= self.window_size:
-            raise ValueError(f"Insufficient data for {symbol}: {len(df)} rows, need at least {self.window_size + 1}")
+        if len(df) < self.window_size:
+            raise ValueError(f"Insufficient data for {symbol}: {len(df)} rows, need at least {self.window_size}")
         if 'close' not in df.columns:
             raise ValueError(f"Dataframe for {symbol} missing required 'close' column")
         
         history = []
         
         # Iterative Simulation (The Time Machine)
-        for i in range(self.window_size, len(df)):
+        # Start from window_size - 1 so window_size=1 executes on first tick (index 0)
+        for i in range(self.window_size - 1, len(df)):
             # slice of data: 'window' represents what the agent 'knows' at this moment
-            window = df.iloc[i - self.window_size : i + 1]
+            # Use exactly window_size bars (not window_size + 1)
+            window = df.iloc[i - self.window_size + 1 : i + 1]
             current_price = window['close'].iloc[-1]
             timestamp = df.index[i]
 
@@ -72,7 +74,7 @@ class LiveEngine:
         agent: CryptoAgent,
         symbols: List[str],
         asset_type: str = "crypto",  # "stock" or "crypto"
-        window_size: int = 2,
+        window_size: int = 1,
     ):
         self.broker = broker
         self.agent = agent
@@ -163,14 +165,14 @@ class LiveEngine:
         if len(self.bar_data[symbol]) > max_bars:
             self.bar_data[symbol] = self.bar_data[symbol].iloc[-max_bars:].reset_index(drop=True)
         
-        logger.info(f"Buffer size for {symbol}: {len(self.bar_data[symbol])}/{self.window_size + 1} bars needed")
+        logger.info(f"Buffer size for {symbol}: {len(self.bar_data[symbol])}/{self.window_size} bars needed")
         
         # Check if we have enough data to evaluate
         if len(self.bar_data[symbol]) >= self.window_size:
             logger.info(f"EVALUATING strategy for {symbol}...")
             await self._evaluate_symbol(symbol)
         else:
-            logger.info(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size + 1}")
+            logger.info(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
 
     async def _evaluate_symbol(self, symbol: str):
         """Evaluate strategy for a specific symbol"""
@@ -190,10 +192,11 @@ class LiveEngine:
                 logger.warning(f"Missing required columns for {symbol}: {missing_cols}")
                 return
             
-            window = df.iloc[-(self.window_size + 1):]
+            # Use exactly window_size bars (not window_size + 1)
+            window = df.iloc[-self.window_size:]
             
-            if len(window) < self.window_size + 1:
-                logger.warning(f"Not enough data for {symbol}: {len(window)}/{self.window_size + 1}")
+            if len(window) < self.window_size:
+                logger.warning(f"Not enough data for {symbol}: {len(window)}/{self.window_size}")
                 return
             
             current_price = window['close'].iloc[-1]
@@ -356,7 +359,13 @@ async def run_standalone_backtest(asset_type="crypto"):
                     final_equity = engine.results[symbol]['equity'].iloc[-1]
                     matrix_results[symbol][tf] = round(final_equity, 2)
                     # Log signal summary
-                    logger.info(f"{symbol} - Total signals: {strategy.signals_generated}, BUY: {strategy.buy_signals}, SELL: {strategy.sell_signals}, HOLD: {strategy.signals_generated - strategy.buy_signals - strategy.sell_signals}")
+                    hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals - strategy.close_long_signals - strategy.close_short_signals
+                    logger.info(
+                        f"{symbol} - Total signals: {strategy.signals_generated}, "
+                        f"OPEN_LONG: {strategy.buy_signals}, OPEN_SHORT: {strategy.sell_signals}, "
+                        f"CLOSE_LONG: {strategy.close_long_signals}, CLOSE_SHORT: {strategy.close_short_signals}, "
+                        f"HOLD: {hold_count}"
+                    )
 
                 except Exception as e:
                     logger.error(f"Failed {symbol} @ {tf}: {e}")
@@ -408,7 +417,7 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
         agent=agent,
         symbols=symbols,
         asset_type=asset_type,
-        window_size=2
+        window_size=1
     )
     
     # Start the engine
