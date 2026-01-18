@@ -16,7 +16,7 @@ from logger import logger
 
 
 class BacktestEngine:
-    def __init__(self, broker, agent, window_size=20):
+    def __init__(self, broker, agent, window_size=2):
         self.broker = broker  # The LocalSimBroker instance
         self.agent = agent    # The ConsecutiveChangeAgent instance
         self.window_size = window_size
@@ -64,7 +64,7 @@ class LiveEngine:
         agent: CryptoAgent,
         symbols: List[str],
         asset_type: str = "crypto",  # "stock" or "crypto"
-        window_size: int = 20,
+        window_size: int = 2,
     ):
         self.broker = broker
         self.agent = agent
@@ -82,10 +82,10 @@ class LiveEngine:
         
         # Data buffer for each symbol - stores recent bars
         self.bar_data: Dict[str, pd.DataFrame] = {
-            symbol: pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+            symbol: pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
             for symbol in symbols
         }
-        
+
         # Running state
         self.is_running = False
         self.last_evaluation = {}
@@ -118,29 +118,26 @@ class LiveEngine:
             await self.shutdown()
     
     async def _on_bar(self, bar: Bar):
-        """
-        Callback when new bar data is received
-        
-        Args:
-            bar: Alpaca Bar object with fields: symbol, timestamp, open, high, low, close, volume
-        """
+        """Callback when new bar data is received"""
         symbol = bar.symbol
         
-        # Log the incoming bar (no emojis for Windows compatibility)
+        # Log the incoming bar
         logger.info(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.4f}, volume={bar.volume:.8f}, "
+            f"close=${bar.close:.2f}, volume={bar.volume:.8f}, "
+            f"vwap=${bar.vwap if bar.vwap else 'N/A'}, "
             f"time={bar.timestamp}"
         )
         
-        # Convert bar to dataframe row
+        # Convert bar to dataframe row (include vwap!)
         new_row = pd.DataFrame([{
             'ts': bar.timestamp,
             'open': bar.open,
             'high': bar.high,
             'low': bar.low,
             'close': bar.close,
-            'volume': bar.volume
+            'volume': bar.volume,
+            'vwap': bar.vwap  # Add VWAP from Alpaca
         }])
         
         # Append to buffer (fix for pandas FutureWarning)
@@ -389,7 +386,7 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
         agent=agent,
         symbols=symbols,
         asset_type=asset_type,
-        window_size=20
+        window_size=2
     )
     
     # Start the engine
@@ -407,7 +404,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "live":
         # Live trading mode
         asset_type = "crypto"  # Default to crypto
-        symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]  # Default crypto symbols
+        symbols = ["AAVE/USD", "AVAX/USD", "BAT/USD", "BCH/USD", "BTC/USD", "CRV/USD", "DOGE/USD", "DOT/USD", "ETH/USD", "GRT/USD", "LINK/USD", "LTC/USD", "PEPE/USD", "SHIB/USD", "SKY/USD", "SOL/USD", "SUSHI/USD", "UNI/USD", "USDC/USD", "USDG/USD", "USDT/USD", "XRP/USD", "XTZ/USD", "YFI/USD"]  # Default crypto symbols
         
         if len(sys.argv) > 2:
             if sys.argv[2] == "stock":

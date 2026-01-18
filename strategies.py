@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from enum import IntEnum
 import pandas as pd
+from logger import logger
 
 class Signal(IntEnum):
     SELL = -1
@@ -35,40 +36,39 @@ class ConsecutiveChangeStrategy(BaseStrategy):
         return Signal.HOLD
     
 class VWAPReversionStrategy(BaseStrategy):
-    """Trade reversions to VWAP with distance threshold"""
+    """Trade reversions to VWAP using Alpaca's built-in VWAP"""
     
     def __init__(self, parameters=None):
         super().__init__(parameters)
-        self.period = parameters.get('period', 20)
-        self.buy_threshold = parameters.get('buy_threshold', -0.008)  # -2%'
-        self.sell_threshold = parameters.get('sell_threshold', 0.008)  # +2%
+        self.lookback = parameters.get('lookback', 2)  # How many bars to look back for valid VWAP
+        self.buy_threshold = parameters.get('buy_threshold', -0.0012)  # -0.8%
+        self.sell_threshold = parameters.get('sell_threshold', 0.0012)  # +0.8%
         self.signals_generated = 0
         self.buy_signals = 0
         self.sell_signals = 0
     
     def generate_signal(self, data: pd.DataFrame) -> Signal:
-        if len(data) < self.period:
+        if len(data) < 2:
             return Signal.HOLD
         
-        recent = data.tail(self.period)
+        # Look at recent bars to find one with valid VWAP
+        recent = data.tail(self.lookback) if len(data) >= self.lookback else data
         
-        # Calculate VWAP
-        typical_price = (recent['high'] + recent['low'] + recent['close']) / 3
-        total_volume = recent['volume'].sum()
+        # Filter for bars with valid VWAP (not null, not zero)
+        valid_bars = recent[recent['vwap'].notna() & (recent['vwap'] > 0)]
         
-        # Safety check: if no volume, can't calculate VWAP
-        if total_volume == 0 or pd.isna(total_volume):
+        if len(valid_bars) == 0:
             return Signal.HOLD
         
-        vwap = (typical_price * recent['volume']).sum() / total_volume
+        # Use the most recent bar with valid VWAP
+        latest = valid_bars.iloc[-1]
+        current_price = latest['close']
+        vwap = latest['vwap']
         
-        # Safety check: invalid VWAP
-        if pd.isna(vwap) or vwap == 0:
-            return Signal.HOLD
-        
-        current_price = recent['close'].iloc[-1]
+        # Calculate distance from VWAP
         distance_pct = (current_price - vwap) / vwap
-        
+        logger.debug(f"VWAP DISTANCE: {distance_pct:.4f}")
+
         signal = Signal.HOLD
         
         # Buy when price is below VWAP by threshold (undervalued)

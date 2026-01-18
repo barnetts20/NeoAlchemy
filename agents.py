@@ -17,7 +17,6 @@ class CryptoAgent(BaseAgent):
     def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
         # 1. Get the Signal
         signal = self.strategy.generate_signal(data)
-        logger.debug("SIGNAL " + signal.name)
         self.commitment = .5
         # 2. Check current position and broker state
         try:
