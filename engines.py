@@ -359,11 +359,10 @@ async def run_standalone_backtest(asset_type="crypto"):
                     final_equity = engine.results[symbol]['equity'].iloc[-1]
                     matrix_results[symbol][tf] = round(final_equity, 2)
                     # Log signal summary
-                    hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals - strategy.close_long_signals - strategy.close_short_signals
+                    hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals
                     logger.info(
                         f"{symbol} - Total signals: {strategy.signals_generated}, "
-                        f"OPEN_LONG: {strategy.buy_signals}, OPEN_SHORT: {strategy.sell_signals}, "
-                        f"CLOSE_LONG: {strategy.close_long_signals}, CLOSE_SHORT: {strategy.close_short_signals}, "
+                        f"OPEN_LONG: {strategy.buy_signals}, CLOSE_LONG: {strategy.sell_signals}, "
                         f"HOLD: {hold_count}"
                     )
 

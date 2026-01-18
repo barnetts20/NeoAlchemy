@@ -39,11 +39,9 @@ class ConsecutiveChangeStrategy(BaseStrategy):
     
 class VWAPReversionStrategy(BaseStrategy):
     """Trade reversions to VWAP using Alpaca's built-in VWAP.
-    Uses banding approach with separate thresholds for opening and closing positions:
+    Uses banding approach with separate thresholds for opening and closing long positions:
     - OPEN_LONG when price < open_long_threshold (e.g., -0.2% below VWAP)
     - CLOSE_LONG when price >= close_long_threshold (e.g., +0.15% above VWAP)
-    - OPEN_SHORT when price > open_short_threshold (e.g., +0.2% above VWAP)
-    - CLOSE_SHORT when price <= close_short_threshold (e.g., -0.15% below VWAP)
     
     This creates bands around VWAP for entry and exit points.
     """
@@ -53,13 +51,9 @@ class VWAPReversionStrategy(BaseStrategy):
         self.lookback = parameters.get('lookback', 1)  # How many bars to look back for valid VWAP
         self.open_long_threshold = parameters.get('open_long_threshold', -0.002)
         self.close_long_threshold = parameters.get('close_long_threshold', 0.0015)
-        self.open_short_threshold = parameters.get('open_short_threshold', 0.002)
-        self.close_short_threshold = parameters.get('close_short_threshold', -0.0015)
         self.signals_generated = 0
         self.buy_signals = 0
         self.sell_signals = 0
-        self.close_long_signals = 0
-        self.close_short_signals = 0
     
     def generate_signal(self, data: pd.DataFrame) -> Signal:
         if len(data) < 1:
@@ -98,27 +92,15 @@ class VWAPReversionStrategy(BaseStrategy):
 
         signal = Signal.HOLD
         
-        # Check outermost thresholds first to prioritize extreme signals
-        # OPEN_LONG: Price below open_long_threshold (e.g., -0.2% below VWAP) - outermost negative
+        # OPEN_LONG: Price below open_long_threshold (e.g., -0.2% below VWAP)
         if distance_pct < self.open_long_threshold:
             signal = Signal.OPEN_LONG
             self.buy_signals += 1
         
-        # OPEN_SHORT: Price above open_short_threshold (e.g., +0.2% above VWAP) - outermost positive
-        elif distance_pct > self.open_short_threshold:
-            signal = Signal.OPEN_SHORT
-            self.sell_signals += 1
-        
-        # CLOSE_SHORT: Close short positions when price reaches close_short_threshold (e.g., -0.15% below VWAP)
-        # Check this before CLOSE_LONG since it's further from VWAP (more negative)
-        elif distance_pct <= self.close_short_threshold:
-            signal = Signal.CLOSE_SHORT
-            self.close_short_signals += 1
-        
         # CLOSE_LONG: Close long positions when price reaches close_long_threshold (e.g., +0.15% above VWAP)
         elif distance_pct >= self.close_long_threshold:
             signal = Signal.CLOSE_LONG
-            self.close_long_signals += 1
+            self.sell_signals += 1
         
         self.signals_generated += 1
         return signal
