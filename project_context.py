@@ -15,12 +15,16 @@ if PROJECT_ROOT not in sys.path:
 # Load configs once
 SETTINGS_PATH = os.path.join(PROJECT_ROOT, "config", "settings.json")
 SECRETS_PATH = os.path.join(PROJECT_ROOT, "config", "secrets.json")
+# ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 
 with open(SETTINGS_PATH) as f:
     SETTINGS = json.load(f)
 
 with open(SECRETS_PATH) as f:
     SECRETS = json.load(f)
+
+# with open(ENV_PATH) as f:
+#    ENVIRONMENT = json.load(f)
 
 # Determine which account to use
 isPaper = SETTINGS["paper"]
