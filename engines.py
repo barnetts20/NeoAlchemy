@@ -78,7 +78,7 @@ class LiveCryptoEngine:
         self.agent = agent
         self.symbols = symbols
         self.asset_type = asset_type
-        self.window_size = agent.get_window_size()
+        self.window_size = agent.window_size
         
         # Get the appropriate stream from project_context (already initialized with credentials)
         if asset_type == "crypto":
@@ -163,14 +163,13 @@ class LiveCryptoEngine:
         if len(self.bar_data[symbol]) > max_bars:
             self.bar_data[symbol] = self.bar_data[symbol].iloc[-max_bars:].reset_index(drop=True)
         
-        logger.info(f"Buffer size for {symbol}: {len(self.bar_data[symbol])}/{self.window_size} bars needed")
+        logger.debug(f"Buffer size for {symbol}: {len(self.bar_data[symbol])}/{self.window_size} bars needed")
         
         # Check if we have enough data to evaluate
         if len(self.bar_data[symbol]) >= self.window_size:
-            logger.info(f"EVALUATING strategy for {symbol}...")
             await self._evaluate_symbol(symbol)
         else:
-            logger.info(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
+            logger.debug(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
 
     async def _evaluate_symbol(self, symbol: str):
         """Evaluate strategy for a specific symbol"""
@@ -196,48 +195,9 @@ class LiveCryptoEngine:
             if len(window) < self.window_size:
                 logger.warning(f"Not enough data for {symbol}: {len(window)}/{self.window_size}")
                 return
-            
-            current_price = window['close'].iloc[-1]
-            
-            logger.info(f"AGENT processing tick for {symbol} at ${current_price:.2f}")
-            
+                        
             # Agent processes the tick (same interface as backtest)
-            self.agent.handle_tick(symbol, window, self.broker)
-            
-            logger.info(f"AGENT finished processing {symbol}")
-            
-            # Log account state periodically
-            now = datetime.now(timezone.utc)
-            last_log = self.last_evaluation.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
-            
-            if (now - last_log).total_seconds() > 60:  # Log every minute
-                try:
-                    account = self.broker.get_account()
-                    positions = self.broker.get_all_positions()
-                    
-                    # Convert string values to float for formatting
-                    equity = float(account.get('equity', 0))
-                    
-                    logger.info("=" * 60)
-                    logger.info(
-                        f"PORTFOLIO [{symbol}] Price: ${current_price:.2f} | "
-                        f"Equity: ${equity:,.2f} | "
-                        f"Positions: {len(positions)}"
-                    )
-                    
-                    if positions:
-                        for pos in positions:
-                            logger.info(
-                                f"  POSITION {pos['symbol']}: {float(pos['qty']):.6f} @ ${float(pos['current_price']):.2f} "
-                                f"(P&L: ${float(pos['unrealized_pl']):.2f})"
-                            )
-                    logger.info("=" * 60)
-                    
-                except Exception as e:
-                    logger.warning(f"Could not fetch account info: {e}")
-                
-                self.last_evaluation[symbol] = now
-                
+            self.agent.handle_tick(symbol, window, self.broker)                
         except Exception as e:
             logger.error(f"ERROR evaluating {symbol}: {e}", exc_info=True)
     
@@ -400,7 +360,6 @@ async def run_live_crypto_trading(symbols: List[str], asset_type: str = "crypto"
         symbols: List of symbols to trade
         asset_type: "stock" or "crypto"
     """
-    logger.info(f"Initializing live trading for {asset_type}: {symbols}")
     
     # Initialize broker (uses credentials from project_context)
     broker = LiveAlpacaBroker()

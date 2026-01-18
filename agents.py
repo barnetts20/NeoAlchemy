@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 import pandas as pd
+from datetime import datetime, timezone
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 from strategies import BaseStrategy, Signal
-from logger import logger
+from logger import logger, LogHelper
 
 class BaseAgent(ABC):
     def __init__(self, strategy: BaseStrategy):
@@ -13,8 +14,11 @@ class BaseAgent(ABC):
         """Standardized signature for both Backtesting and Live."""
         pass
 
-    def get_window_size(self) -> int:
+    @property
+    def window_size(self) -> int:
+        """Delegate to strategy's window size"""
         return self.strategy.window_size
+
 
 class CryptoAgent(BaseAgent):
     def __init__(self, strategy: BaseStrategy, commitment: float = 0.5):
@@ -24,6 +28,7 @@ class CryptoAgent(BaseAgent):
     def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
         # 1. Get the Signal
         signal = self.strategy.generate_signal(data)
+        logger.info(f"SIGNAL: {signal.name}")
         # 2. Check current position and broker state
         try:
             current_pos = broker.get_open_position(symbol)
@@ -38,7 +43,7 @@ class CryptoAgent(BaseAgent):
             acc = broker.get_account()
             available_cash = float(acc["cash"])
         except Exception as e:
-            logger.error(f"Failed to get account info for {symbol}: {e}")
+            logger.error(f"ERROR | {symbol} | Failed to get account info | reason: {str(e)}")
             return
         
         # Validate data has required columns
@@ -61,13 +66,13 @@ class CryptoAgent(BaseAgent):
         # --- Logic: BUY Signal ---
         if signal == Signal.OPEN_LONG:
             if qty_owned > 0:
-                logger.debug(f"SIGNAL: OPEN_LONG but already have LONG position in {symbol} (qty: {qty_owned})")
+                logger.debug(f"{symbol} | OPEN_LONG signal ignored - already have position (qty: {qty_owned:.6f})")
             else:
                 buy_qty = (available_cash * self.commitment) / current_price
                 if buy_qty > 0:
-                    logger.info(f"SIGNAL: OPEN_LONG {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
                     try:
-                        broker.submit_order(
+                        # Submit order
+                        order_response = broker.submit_order(
                             symbol=symbol,
                             qty=buy_qty, 
                             side=OrderSide.BUY,
@@ -75,17 +80,38 @@ class CryptoAgent(BaseAgent):
                             time_in_force=TimeInForce.GTC,
                             current_price=current_price
                         )
+                        
+                        # Extract fee from order response
+                        order_fee = self._extract_fee(order_response)
+                        
+                        # Log OPEN (plain text, no color)
+                        logger.info(
+                            f"OPEN | {symbol} | BUY {buy_qty:.6f} @ ${current_price:,.2f} | "
+                            f"value: ${buy_qty * current_price:,.2f} | fee: ${order_fee:.2f}"
+                        )
+                        
+                        # Log account status after opening position
+                        self._log_account_status(broker)
+                        
                     except Exception as e:
-                        logger.error(f"Failed to submit BUY order for {symbol}: {e}", exc_info=True)
+                        logger.error(f"ERROR | {symbol} | Failed to OPEN_LONG | reason: {str(e)}")
 
         # --- Logic: CLOSE LONG ---
         elif signal == Signal.CLOSE_LONG:
             if qty_owned <= 0:
-                logger.debug(f"SIGNAL: CLOSE_LONG but no long position in {symbol}")
+                logger.debug(f"{symbol} | CLOSE_LONG signal ignored - no position to close")
             else:
-                logger.info(f"SIGNAL: CLOSE_LONG {float(qty_owned):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(qty_owned * current_price):.2f})")
                 try:
-                    broker.submit_order(
+                    # Get position data (we already have it from earlier)
+                    entry_price = float(current_pos.get("avg_entry_price", 0))
+                    
+                    # Get position created time if available (for hold duration)
+                    # Different brokers may have different field names
+                    created_at = current_pos.get('created_at') or current_pos.get('submitted_at')
+                    hold_duration = self._calculate_hold_duration(created_at) if created_at else "unknown"
+                    
+                    # Submit order
+                    order_response = broker.submit_order(
                         symbol=symbol,
                         qty=qty_owned,
                         side=OrderSide.SELL,
@@ -93,16 +119,140 @@ class CryptoAgent(BaseAgent):
                         time_in_force=TimeInForce.GTC,
                         current_price=current_price
                     )
+                    
+                    # Calculate P&L
+                    entry_value = qty_owned * entry_price
+                    exit_value = qty_owned * current_price
+                    pnl_dollars = exit_value - entry_value
+                    pnl_percent = (pnl_dollars / entry_value * 100) if entry_value > 0 else 0
+                    
+                    # Extract fee from order response
+                    order_fee = self._extract_fee(order_response)
+                    
+                    # Determine color and emoji based on P&L
+                    emoji, color = LogHelper.determine_pnl_color(pnl_dollars, pnl_percent)
+                    
+                    # Build log message
+                    log_msg = (
+                        f"{emoji} CLOSE | {symbol} | SELL {qty_owned:.6f} @ ${current_price:,.2f} "
+                        f"(entry: ${entry_price:,.2f}) | "
+                        f"P&L: {LogHelper.format_pnl(pnl_dollars, pnl_percent)} | "
+                        f"fee: ${order_fee:.2f} | held: {hold_duration}"
+                    )
+                    
+                    # Log with color (ONLY CLOSE logs get colored)
+                    logger.info(log_msg)
+                    
+                    # Log account status after closing position
+                    self._log_account_status(broker)
+                    
                 except Exception as e:
-                    logger.error(f"Failed to submit CLOSE_LONG order for {symbol}: {e}", exc_info=True)
+                    logger.error(f"ERROR | {symbol} | Failed to CLOSE_LONG | reason: {str(e)}")
         
         # --- Logic: SHORT Signals (not supported for crypto) ---
         elif signal == Signal.OPEN_SHORT:
-            logger.error(f"SIGNAL: OPEN_SHORT not supported for crypto trading on {symbol}")
+            logger.error(f"ERROR | {symbol} | OPEN_SHORT not supported for crypto trading")
         
         elif signal == Signal.CLOSE_SHORT:
-            logger.error(f"SIGNAL: CLOSE_SHORT not supported for crypto trading on {symbol}")
+            logger.error(f"ERROR | {symbol} | CLOSE_SHORT not supported for crypto trading")
 
         # --- HOLD Signal ---
         else:
-            logger.debug(f"SIGNAL: HOLD for {symbol}")
+            logger.debug(f"SIGNAL | {symbol} | HOLD")
+    
+    def _extract_fee(self, order_response: dict) -> float:
+        """
+        Extract fee from order response
+        
+        For LocalSimBroker: order_response['_sim_fee_cash']
+        For LiveAlpacaBroker: Calculate from order details
+        
+        Args:
+            order_response: Order response dict from broker
+        
+        Returns:
+            Fee amount in dollars
+        """
+        # Try sim broker first
+        fee = order_response.get('_sim_fee_cash', 0)
+        
+        if fee == 0:
+            # For live broker, calculate from filled price and qty
+            # This is an approximation - actual fees may vary
+            qty = float(order_response.get('filled_qty', 0))
+            avg_price = float(order_response.get('filled_avg_price', 0))
+            notional = qty * avg_price
+            
+            # Crypto: 0.25% taker fee (Alpaca tier 1)
+            symbol = order_response.get('symbol', '')
+            if '/' in symbol:  # Crypto
+                fee = notional * 0.0025
+        
+        return float(fee)
+    
+    def _calculate_hold_duration(self, created_at) -> str:
+        """
+        Calculate how long a position was held based on position created timestamp
+        
+        Args:
+            created_at: Position creation timestamp (string or datetime)
+        
+        Returns:
+            Formatted duration string like "2.5h" or "45m"
+        """
+        if not created_at:
+            return "unknown"
+        
+        try:
+            # Handle both string and datetime inputs
+            if isinstance(created_at, str):
+                from dateutil import parser
+                open_time = parser.parse(created_at)
+            else:
+                open_time = created_at
+            
+            # Ensure timezone aware
+            if open_time.tzinfo is None:
+                open_time = open_time.replace(tzinfo=timezone.utc)
+            
+            close_time = datetime.now(timezone.utc)
+            duration_seconds = (close_time - open_time).total_seconds()
+            
+            # Format as hours or minutes
+            if duration_seconds >= 3600:  # 1 hour or more
+                hours = duration_seconds / 3600
+                return f"{hours:.1f}h"
+            else:
+                minutes = duration_seconds / 60
+                return f"{minutes:.0f}m"
+        except Exception:
+            return "unknown"
+    
+    def _log_account_status(self, broker):
+        """
+        Log account status after position changes (plain text, no color)
+        
+        Args:
+            broker: Broker instance
+        """
+        try:
+            acc = broker.get_account()
+            positions = broker.get_all_positions()
+            
+            equity = float(acc.get('equity', 0))
+            cash = float(acc.get('cash', 0))
+            initial_equity = float(acc.get('initial_capital', equity))  # Fallback to current if not available
+            
+            # Calculate equity change percentage
+            equity_change_pct = ((equity - initial_equity) / initial_equity * 100) if initial_equity > 0 else 0
+            
+            # Calculate total unrealized P&L
+            open_pnl = sum(float(pos.get('unrealized_pl', 0)) for pos in positions)
+            
+            # Log account status (plain text)
+            logger.info(
+                f"ACCOUNT | Equity: ${equity:,.2f} ({'+' if equity_change_pct >= 0 else ''}{equity_change_pct:.2f}%) | "
+                f"Cash: ${cash:,.2f} | Positions: {len(positions)} | Open P&L: {'+' if open_pnl >= 0 else ''}${open_pnl:.2f}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not log account status: {e}")

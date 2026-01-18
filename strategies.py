@@ -55,8 +55,8 @@ class VWAPReversionStrategy(BaseStrategy):
         params = parameters or {}
         super().__init__(1, params)
         self.lookback = self.window_size
-        self.open_long_threshold = parameters.get('open_long_threshold', -0.003)
-        self.close_long_threshold = parameters.get('close_long_threshold', 0.0025)
+        self.open_long_threshold = parameters.get('open_long_threshold', -0.001)
+        self.close_long_threshold = parameters.get('close_long_threshold', 0.001)
         self.signals_generated = 0
         self.buy_signals = 0
         self.sell_signals = 0
@@ -98,12 +98,12 @@ class VWAPReversionStrategy(BaseStrategy):
 
         signal = Signal.HOLD
         
-        # OPEN_LONG: Price below open_long_threshold (e.g., -0.2% below VWAP)
+        # OPEN_LONG: Price below open_long_threshold
         if distance_pct < self.open_long_threshold:
             signal = Signal.OPEN_LONG
             self.buy_signals += 1
         
-        # CLOSE_LONG: Close long positions when price reaches close_long_threshold (e.g., +0.15% above VWAP)
+        # CLOSE_LONG: Close long positions when price reaches close_long_threshold
         elif distance_pct >= self.close_long_threshold:
             signal = Signal.CLOSE_LONG
             self.sell_signals += 1
