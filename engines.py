@@ -305,7 +305,7 @@ class BacktestDataRepository:
     async def fetch_history(self, asset_type: str, symbol: str, timeframe: str) -> pd.DataFrame:
         table = self.table_map[asset_type][timeframe]
         query = f"""
-            SELECT ts, open, high, low, close, volume 
+            SELECT ts, open, high, low, close, volume, vwap 
             FROM {table} 
             WHERE symbol = %s 
             ORDER BY ts ASC;
@@ -314,7 +314,7 @@ class BacktestDataRepository:
             await cur.execute(query, (symbol,))
             rows = await cur.fetchall()
             
-            df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+            df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
             df.set_index('ts', inplace=True)
             return df
 
@@ -347,7 +347,8 @@ async def run_standalone_backtest(asset_type="crypto"):
                     # 2. Fetch from DB (e.g., crypto_candles_1h)
                     df = await repo.fetch_history(asset_type, symbol, tf)
                     
-                    if df is None or len(df) <= engine.window_size:
+                    # Consistent validation: need at least window_size rows (not <=)
+                    if df is None or len(df) < engine.window_size:
                         matrix_results[symbol][tf] = "NO_DATA"
                         continue
 
