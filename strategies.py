@@ -53,6 +53,14 @@ class VWAPReversionStrategy(BaseStrategy):
         if len(data) < 2:
             return Signal.HOLD
         
+        # Validate required columns
+        if 'close' not in data.columns:
+            logger.warning("DataFrame missing 'close' column")
+            return Signal.HOLD
+        if 'vwap' not in data.columns:
+            logger.warning("DataFrame missing 'vwap' column")
+            return Signal.HOLD
+        
         # Look at recent bars to find one with valid VWAP
         recent = data.tail(self.lookback) if len(data) >= self.lookback else data
         
@@ -66,6 +74,11 @@ class VWAPReversionStrategy(BaseStrategy):
         latest = valid_bars.iloc[-1]
         current_price = latest['close']
         vwap = latest['vwap']
+        
+        # Validate vwap is not zero to avoid division by zero
+        if vwap == 0 or pd.isna(vwap):
+            logger.warning("VWAP is zero or NaN, cannot calculate signal")
+            return Signal.HOLD
         
         # Calculate distance from VWAP
         distance_pct = (current_price - vwap) / vwap

@@ -17,11 +17,21 @@ SETTINGS_PATH = os.path.join(PROJECT_ROOT, "config", "settings.json")
 SECRETS_PATH = os.path.join(PROJECT_ROOT, "config", "secrets.json")
 # ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
 
-with open(SETTINGS_PATH) as f:
-    SETTINGS = json.load(f)
+try:
+    with open(SETTINGS_PATH) as f:
+        SETTINGS = json.load(f)
+except FileNotFoundError:
+    raise FileNotFoundError(f"Settings file not found: {SETTINGS_PATH}")
+except json.JSONDecodeError as e:
+    raise ValueError(f"Invalid JSON in settings file {SETTINGS_PATH}: {e}")
 
-with open(SECRETS_PATH) as f:
-    SECRETS = json.load(f)
+try:
+    with open(SECRETS_PATH) as f:
+        SECRETS = json.load(f)
+except FileNotFoundError:
+    raise FileNotFoundError(f"Secrets file not found: {SECRETS_PATH}")
+except json.JSONDecodeError as e:
+    raise ValueError(f"Invalid JSON in secrets file {SECRETS_PATH}: {e}")
 
 # with open(ENV_PATH) as f:
 #    ENVIRONMENT = json.load(f)

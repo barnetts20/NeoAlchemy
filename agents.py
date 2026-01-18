@@ -14,10 +14,13 @@ class BaseAgent(ABC):
         pass
 
 class CryptoAgent(BaseAgent):
+    def __init__(self, strategy: BaseStrategy, commitment: float = 0.5):
+        super().__init__(strategy)
+        self.commitment = commitment  # Fraction of cash to use per trade (0.0 to 1.0)
+    
     def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
         # 1. Get the Signal
         signal = self.strategy.generate_signal(data)
-        self.commitment = .5
         # 2. Check current position and broker state
         try:
             current_pos = broker.get_open_position(symbol)
@@ -28,9 +31,29 @@ class CryptoAgent(BaseAgent):
             qty_owned = 0.0
         
         # 3. Get Account Cash for sizing
-        acc = broker.get_account()
-        available_cash = float(acc["cash"])
+        try:
+            acc = broker.get_account()
+            available_cash = float(acc["cash"])
+        except Exception as e:
+            logger.error(f"Failed to get account info for {symbol}: {e}")
+            return
+        
+        # Validate data has required columns
+        if 'close' not in data.columns or len(data) == 0:
+            logger.warning(f"Invalid data for {symbol}: missing 'close' column or empty dataframe")
+            return
+        
         current_price = float(data['close'].iloc[-1])
+        
+        # Validate price is positive
+        if current_price <= 0:
+            logger.warning(f"Invalid price for {symbol}: {current_price}")
+            return
+        
+        # Validate commitment is reasonable
+        if not 0 < self.commitment <= 1:
+            logger.warning(f"Invalid commitment value: {self.commitment}, must be between 0 and 1")
+            return
 
         # --- Logic: BUY Signal ---
         if signal == Signal.OPEN_LONG:
@@ -39,26 +62,32 @@ class CryptoAgent(BaseAgent):
             elif qty_owned < 0:
                 logger.debug(f"SIGNAL: OPEN_LONG but already have SHORT position in {symbol} (qty: {qty_owned})")
                 logger.debug("CLOSING SHORT POSITION")
-                broker.submit_order(
-                    symbol=symbol,
-                    qty=abs(qty_owned),  # Use absolute value
-                    side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
-                    time_in_force=TimeInForce.GTC,
-                    current_price=current_price
-                )
-            else:
-                buy_qty = (available_cash * self.commitment) / current_price
-                if buy_qty > 0:
-                    logger.info(f"SIGNAL: OPEN_LONG {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
+                try:
                     broker.submit_order(
                         symbol=symbol,
-                        qty=buy_qty, 
+                        qty=abs(qty_owned),  # Use absolute value
                         side=OrderSide.BUY,
                         order_type=OrderType.MARKET,
                         time_in_force=TimeInForce.GTC,
                         current_price=current_price
                     )
+                except Exception as e:
+                    logger.error(f"Failed to close SHORT position for {symbol}: {e}", exc_info=True)
+            else:
+                buy_qty = (available_cash * self.commitment) / current_price
+                if buy_qty > 0:
+                    logger.info(f"SIGNAL: OPEN_LONG {float(buy_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(buy_qty * current_price):.2f})")
+                    try:
+                        broker.submit_order(
+                            symbol=symbol,
+                            qty=buy_qty, 
+                            side=OrderSide.BUY,
+                            order_type=OrderType.MARKET,
+                            time_in_force=TimeInForce.GTC,
+                            current_price=current_price
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to submit BUY order for {symbol}: {e}", exc_info=True)
 
         # --- Logic: SHORT Signal ---
         elif signal == Signal.OPEN_SHORT:
@@ -67,26 +96,32 @@ class CryptoAgent(BaseAgent):
             elif qty_owned > 0:  # Have long, close it
                 logger.info(f"SIGNAL: OPEN_SHORT but have LONG position in {symbol} (qty: {qty_owned})")
                 logger.info("CLOSING LONG POSITION")
-                broker.submit_order(
-                    symbol=symbol,
-                    qty=qty_owned,
-                    side=OrderSide.SELL,
-                    order_type=OrderType.MARKET,
-                    time_in_force=TimeInForce.GTC,
-                    current_price=current_price
-                )
-            else:  # qty_owned == 0, open short
-                sell_qty = (available_cash * self.commitment) / current_price
-                if sell_qty > 0:
-                    logger.info(f"SIGNAL: OPEN_SHORT {float(sell_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(sell_qty * current_price):.2f})")
+                try:
                     broker.submit_order(
                         symbol=symbol,
-                        qty=sell_qty,
+                        qty=qty_owned,
                         side=OrderSide.SELL,
                         order_type=OrderType.MARKET,
                         time_in_force=TimeInForce.GTC,
                         current_price=current_price
                     )
+                except Exception as e:
+                    logger.error(f"Failed to close LONG position for {symbol}: {e}", exc_info=True)
+            else:  # qty_owned == 0, open short
+                sell_qty = (available_cash * self.commitment) / current_price
+                if sell_qty > 0:
+                    logger.info(f"SIGNAL: OPEN_SHORT {float(sell_qty):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(sell_qty * current_price):.2f})")
+                    try:
+                        broker.submit_order(
+                            symbol=symbol,
+                            qty=sell_qty,
+                            side=OrderSide.SELL,
+                            order_type=OrderType.MARKET,
+                            time_in_force=TimeInForce.GTC,
+                            current_price=current_price
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to submit SELL order for {symbol}: {e}", exc_info=True)
 
         # --- Logic: CLOSE LONG ---
         elif signal == Signal.CLOSE_LONG:
@@ -94,14 +129,17 @@ class CryptoAgent(BaseAgent):
                 logger.debug(f"SIGNAL: CLOSE_LONG but no long position in {symbol}")
             else:
                 logger.info(f"SIGNAL: CLOSE_LONG {float(qty_owned):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(qty_owned * current_price):.2f})")
-                broker.submit_order(
-                    symbol=symbol,
-                    qty=qty_owned,
-                    side=OrderSide.SELL,
-                    order_type=OrderType.MARKET,
-                    time_in_force=TimeInForce.GTC,
-                    current_price=current_price
-                )
+                try:
+                    broker.submit_order(
+                        symbol=symbol,
+                        qty=qty_owned,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        time_in_force=TimeInForce.GTC,
+                        current_price=current_price
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to submit CLOSE_LONG order for {symbol}: {e}", exc_info=True)
 
         # --- Logic: CLOSE SHORT ---
         elif signal == Signal.CLOSE_SHORT:
@@ -109,14 +147,17 @@ class CryptoAgent(BaseAgent):
                 logger.debug(f"SIGNAL: CLOSE_SHORT but no short position in {symbol}")
             else:
                 logger.info(f"SIGNAL: CLOSE_SHORT {float(abs(qty_owned)):.6f} {symbol} @ ${float(current_price):.2f} (value: ${float(abs(qty_owned) * current_price):.2f})")
-                broker.submit_order(
-                    symbol=symbol,
-                    qty=abs(qty_owned),  # Use absolute value
-                    side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
-                    time_in_force=TimeInForce.GTC,
-                    current_price=current_price
-                )
+                try:
+                    broker.submit_order(
+                        symbol=symbol,
+                        qty=abs(qty_owned),  # Use absolute value
+                        side=OrderSide.BUY,
+                        order_type=OrderType.MARKET,
+                        time_in_force=TimeInForce.GTC,
+                        current_price=current_price
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to submit CLOSE_SHORT order for {symbol}: {e}", exc_info=True)
 
         # --- HOLD Signal ---
         else:

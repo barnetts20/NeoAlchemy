@@ -24,6 +24,14 @@ class BacktestEngine:
 
     def run_backtest(self, symbol: str, df: pd.DataFrame):
         """Runs the strategy against a single symbol's dataframe."""
+        # Validate input
+        if df is None or len(df) == 0:
+            raise ValueError(f"Empty dataframe provided for {symbol}")
+        if len(df) <= self.window_size:
+            raise ValueError(f"Insufficient data for {symbol}: {len(df)} rows, need at least {self.window_size + 1}")
+        if 'close' not in df.columns:
+            raise ValueError(f"Dataframe for {symbol} missing required 'close' column")
+        
         history = []
         
         # Iterative Simulation (The Time Machine)
@@ -140,11 +148,15 @@ class LiveEngine:
             'vwap': bar.vwap  # Add VWAP from Alpaca
         }])
         
-        # Append to buffer (fix for pandas FutureWarning)
+        # Append to buffer (use list accumulation for efficiency)
+        # Convert to list of dicts, append, then recreate DataFrame
         if self.bar_data[symbol].empty:
             self.bar_data[symbol] = new_row
         else:
-            self.bar_data[symbol] = pd.concat([self.bar_data[symbol], new_row], ignore_index=True)
+            # More efficient: convert to dict list, append, recreate
+            data_list = self.bar_data[symbol].to_dict('records')
+            data_list.append(new_row.iloc[0].to_dict())
+            self.bar_data[symbol] = pd.DataFrame(data_list)
         
         # Keep only the data we need (window_size + some buffer)
         max_bars = self.window_size * 3  # Keep 3x window size for safety
@@ -163,8 +175,21 @@ class LiveEngine:
     async def _evaluate_symbol(self, symbol: str):
         """Evaluate strategy for a specific symbol"""
         try:
+            # Validate data exists
+            if symbol not in self.bar_data or len(self.bar_data[symbol]) == 0:
+                logger.warning(f"No data available for {symbol}")
+                return
+            
             # Get the window of data (same as backtest)
             df = self.bar_data[symbol].set_index('ts')
+            
+            # Validate required columns
+            required_cols = ['close']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                logger.warning(f"Missing required columns for {symbol}: {missing_cols}")
+                return
+            
             window = df.iloc[-(self.window_size + 1):]
             
             if len(window) < self.window_size + 1:
@@ -333,9 +358,6 @@ async def run_standalone_backtest(asset_type="crypto"):
                     # Log signal summary
                     logger.info(f"{symbol} - Total signals: {strategy.signals_generated}, BUY: {strategy.buy_signals}, SELL: {strategy.sell_signals}, HOLD: {strategy.signals_generated - strategy.buy_signals - strategy.sell_signals}")
 
-                    # 4. Extract Result
-                    final_equity = engine.results[symbol]['equity'].iloc[-1]
-
                 except Exception as e:
                     logger.error(f"Failed {symbol} @ {tf}: {e}")
                     matrix_results[symbol][tf] = "ERROR"
@@ -394,11 +416,13 @@ async def run_live_trading(symbols: List[str], asset_type: str = "crypto"):
 
 
 if __name__ == "__main__":
-    # Standard cross-platform loop handling
+    # Standard cross-platform loop handling for Windows
     if sys.platform == "win32":
-        loop_factory = lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
+        # Windows requires SelectorEventLoop for psycopg compatibility
+        loop = asyncio.SelectorEventLoop(selectors.SelectSelector())
+        asyncio.set_event_loop(loop)
     else:
-        loop_factory = None
+        loop = None
 
     # Check command line arguments
     if len(sys.argv) > 1 and sys.argv[1] == "live":
@@ -414,12 +438,24 @@ if __name__ == "__main__":
                 symbols = sys.argv[2].split(",")
         
         try:
-            asyncio.run(run_live_trading(symbols, asset_type))
+            if loop:
+                loop.run_until_complete(run_live_trading(symbols, asset_type))
+            else:
+                asyncio.run(run_live_trading(symbols, asset_type))
         except KeyboardInterrupt:
             logger.info("Live trading terminated by user.")
+        finally:
+            if loop:
+                loop.close()
     else:
         # Backtest mode (default)
         try:
-            asyncio.run(run_standalone_backtest("crypto"), loop_factory=loop_factory)
+            if loop:
+                loop.run_until_complete(run_standalone_backtest("crypto"))
+            else:
+                asyncio.run(run_standalone_backtest("crypto"))
         except KeyboardInterrupt:
             logger.info("Backtest process terminated by user.")
+        finally:
+            if loop:
+                loop.close()

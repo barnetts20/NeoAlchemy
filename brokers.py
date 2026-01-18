@@ -136,7 +136,7 @@ class LocalSimBroker:
 
     # --- HELPER: Fee Calculation ---
     def _calculate_fees(self, symbol: str, qty: float, price: float, side: OrderSide) -> float:
-        is_crypto = "/" in symbol or "USD" in symbol.upper() # Simple heuristic
+        is_crypto = self._is_crypto(symbol)  # Use improved detection method
         notional = qty * price
         fees = 0.0
 
@@ -161,10 +161,17 @@ class LocalSimBroker:
     def _is_crypto(self, symbol: str) -> bool:
         """
         Helper to determine if a symbol is crypto.
-        Adjust logic if your symbols use different naming conventions.
+        Checks for crypto-specific patterns while avoiding false positives.
         """
-        crypto_suffixes = ['/USD', '/BTC', '/ETH', '/USDT']
-        return any(suffix in symbol.upper() for suffix in crypto_suffixes)
+        symbol_upper = symbol.upper()
+        # Check for crypto pair separators (most reliable indicator)
+        if '/' in symbol:
+            # Check that it's not a stock symbol with a slash (unlikely but possible)
+            crypto_suffixes = ['/USD', '/BTC', '/ETH', '/USDT', '/USDC', '/DAI']
+            return any(symbol_upper.endswith(suffix) for suffix in crypto_suffixes)
+        # Fallback: check for common crypto-only patterns (less reliable)
+        # Avoid matching "USDT" as a standalone stock symbol
+        return False
     
     # --- DATA INGESTION ---
     def update_price(self, symbol: str, price: float):
@@ -218,7 +225,8 @@ class LocalSimBroker:
         market_value = qty * current_price
         cost_basis = qty * avg_entry
         unrealized_pl = market_value - cost_basis
-        unrealized_plpc = (unrealized_pl / cost_basis) if cost_basis != 0 else 0
+        # Avoid division by zero with epsilon check for floating point safety
+        unrealized_plpc = (unrealized_pl / cost_basis) if abs(cost_basis) > 1e-9 else 0.0
 
         # Note: All numbers are returned as strings in Alpaca API, 
         # but we keep them as floats here for sim ease unless you strictly need strings.
@@ -383,7 +391,11 @@ class LocalSimBroker:
             
             # Weighted average based on what was actually received
             # We use the market price for the cost basis of the new shares/coins
-            pos['avg_entry_price'] = (current_total_cost + (qty * price)) / new_qty
+            if new_qty > 0:
+                pos['avg_entry_price'] = (current_total_cost + (qty * price)) / new_qty
+            else:
+                # Edge case: should not happen, but protect against division by zero
+                pos['avg_entry_price'] = price
             pos['qty'] = new_qty
             self.positions[symbol] = pos
             
@@ -428,17 +440,28 @@ class LocalSimBroker:
     def close_all_positions(self, cancel_orders: bool = True) -> List[Dict]:
         """
         Liquidates all positions using Market Orders to ensure fees/PNL are calculated.
+        Continues closing positions even if one fails.
         """
         if cancel_orders:
             self.cancel_orders()
 
         closed_orders = []
+        errors = []
         # Create a static list of keys to avoid runtime error while modifying the dict
         for symbol in list(self.positions.keys()):
-            # We reuse close_position to ensure consistent logic
-            result = self.close_position(symbol)
-            if result:
-                closed_orders.append(result)
+            try:
+                # We reuse close_position to ensure consistent logic
+                result = self.close_position(symbol)
+                if result:
+                    closed_orders.append(result)
+            except Exception as e:
+                errors.append(f"{symbol}: {str(e)}")
+                # Continue with other positions even if one fails
+        
+        if errors:
+            # Log errors but don't fail the entire operation
+            import logging
+            logging.warning(f"Errors closing some positions: {', '.join(errors)}")
         
         return closed_orders
 
