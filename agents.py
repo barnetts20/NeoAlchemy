@@ -86,9 +86,9 @@ class CryptoAgent(BaseAgent):
                         order_fee = self._extract_fee(order_response) or 0.0
                         
                         # Log OPEN (plain text, no color)
-                        logger.info(
-                            f"OPEN | {symbol} | BUY {buy_qty:.6f} @ ${current_price:,.2f} | "
-                            f"value: ${buy_qty * current_price:,.2f} | fee: ${order_fee:.2f}"
+                        logger.info(LogHelper.colorize(
+                            f"💰 OPEN | {symbol} | BUY {buy_qty:.6f} @ ${current_price:,.2f} | "
+                            f"value: ${buy_qty * current_price:,.2f} | fee: ${order_fee:.2f}", "PURPLE")
                         )
                         
                         # Log account status after opening position
@@ -268,9 +268,27 @@ class CryptoAgent(BaseAgent):
             open_pnl = sum(float(pos.get('unrealized_pl', 0) or 0) for pos in positions)
             
             # Log account status (plain text)
-            logger.info(
-                f"ACCOUNT | Equity: ${equity:,.2f} ({'+' if equity_change_pct >= 0 else ''}{equity_change_pct:.2f}%) | "
-                f"Cash: ${cash:,.2f} | Positions: {len(positions)} | Open P&L: {'+' if open_pnl >= 0 else ''}${open_pnl:.2f}"
+            logger.info(LogHelper.colorize(
+                f"🏦 ACCOUNT | Equity: ${equity:,.2f} ({'+' if equity_change_pct >= 0 else ''}{equity_change_pct:.2f}%) | "
+                f"Cash: ${cash:,.2f} | Positions: {len(positions)} | Open P&L: {'+' if open_pnl >= 0 else ''}${open_pnl:.2f}", 
+                'BLUE')
             )
+            # Log each position indented under account status
+            if positions:
+                for pos in positions:
+                    symbol = pos.get('symbol', 'UNKNOWN')
+                    qty = float(pos.get('qty', 0) or 0)
+                    current_price = float(pos.get('current_price', 0) or 0)
+                    avg_entry = float(pos.get('avg_entry_price', 0) or 0)
+                    unrealized_pl = float(pos.get('unrealized_pl', 0) or 0)
+                    unrealized_plpc = float(pos.get('unrealized_plpc', 0) or 0) * 100  # Convert to percentage
+                    
+                    logger.info(LogHelper.colorize(
+                        f"    ↳ {symbol}: {qty:.6f} @ ${current_price:.2f} "
+                        f"(entry: ${avg_entry:.2f}) | "
+                        f"P&L: {'+' if unrealized_pl >= 0 else ''}${unrealized_pl:.2f} "
+                        f"({'+' if unrealized_plpc >= 0 else ''}{unrealized_plpc:.2f}%)", 
+                        'BLUE')
+                    )
         except Exception as e:
             logger.warning(f"Could not log account status: {e}")

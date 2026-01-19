@@ -11,8 +11,10 @@ class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
     YELLOW = '\033[93m'
+    PURPLE = '\033[95m'
+    GREY = '\033[90m'
     RESET = '\033[0m'
-
+    BLUE = '\033[96m'
 
 class LogHelper:
     """Helper methods for formatting trading logs"""

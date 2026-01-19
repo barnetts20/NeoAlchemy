@@ -11,7 +11,7 @@ from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
 from strategies import VWAPReversionStrategy
 from psycopg import AsyncConnection
-from logger import logger
+from logger import LogHelper, logger
 
 
 class BacktestEngine:
@@ -130,11 +130,13 @@ class LiveCryptoEngine:
         symbol = bar.symbol
         
         # Log the incoming bar
-        logger.info(
+        vwap_value = bar.vwap if bar.vwap else bar.close
+        logger.debug(LogHelper.colorize(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.2f}, volume={bar.volume:.10f}, "
-            f"vwap=${bar.vwap if bar.vwap else 'N/A'}, "
-            f"time={bar.timestamp}"
+            f"close=${bar.close:.9f}, volume={bar.volume:.9f}, "
+            f"vwap=${vwap_value:.9f}, "
+            f"time={bar.timestamp}",
+            'GREY')
         )
         
         # Convert bar to dataframe row (include vwap!)
@@ -201,49 +203,63 @@ class LiveCryptoEngine:
         except Exception as e:
             logger.error(f"ERROR evaluating {symbol}: {e}", exc_info=True)
     
-    async def shutdown(self):
-        """Gracefully shutdown the engine"""
-        logger.info("Shutting down live engine...")
-        self.is_running = False
+async def shutdown(self):
+    """Gracefully shutdown the engine"""
+    logger.info("Shutting down live engine...")
+    self.is_running = False
+    
+    # Close stream connections
+    try:
+        await self.stream.stop_ws()
+        logger.info("Stream stopped")
+    except Exception as e:
+        logger.error(f"Error stopping stream: {e}")
+    
+    # Give tasks time to cleanup
+    await asyncio.sleep(0.5)
+    
+    # Cancel any remaining tasks
+    try:
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
         
-        # Close stream connections
-        try:
-            await self.stream.stop_ws()
-            logger.info("Stream stopped")
-        except Exception as e:
-            logger.error(f"Error stopping stream: {e}")
+        # Wait for tasks to complete cancellation
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logger.debug(f"Task cleanup: {e}")
+    
+    # Log final positions and account state
+    try:
+        account = self.broker.get_account()
+        positions = self.broker.get_all_positions()
         
-        # Log final positions and account state
-        try:
-            account = self.broker.get_account()
-            positions = self.broker.get_all_positions()
-            
-            logger.info("=" * 60)
-            logger.info("FINAL ACCOUNT STATE")
-            logger.info("=" * 60)
-            logger.info(f"Equity: ${float(account.get('equity', 0)):,.2f}")
-            logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
-            logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
-            logger.info(f"Open Positions: {len(positions)}")
+        logger.info("=" * 60)
+        logger.info("FINAL ACCOUNT STATE")
+        logger.info("=" * 60)
+        logger.info(f"Equity: ${float(account.get('equity', 0)):,.2f}")
+        logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
+        logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
+        logger.info(f"Open Positions: {len(positions)}")
 
-            if positions:
-                logger.info("\nPositions:")
-                for pos in positions:
-                    logger.info(
-                        f"  {pos['symbol']}: {pos['qty']} shares @ "
-                        f"${float(pos['current_price']):.2f} "
-                        f"(P&L: ${float(pos['unrealized_pl']):.2f})"
-                    )
-            
-            logger.info("=" * 60)
-
-            self.broker.close_all_positions(True)
-            
-        except Exception as e:
-            logger.error(f"Error getting final state: {e}")
+        if positions:
+            logger.info("\nPositions:")
+            for pos in positions:
+                logger.info(
+                    f"  {pos['symbol']}: {pos['qty']} @ "
+                    f"${float(pos['current_price']):.2f} "
+                    f"(P&L: ${float(pos['unrealized_pl']):.2f})"
+                )
         
-        logger.info("Shutdown complete")
+        logger.info("=" * 60)
 
+        self.broker.close_all_positions(True)
+        
+    except Exception as e:
+        logger.error(f"Error getting final state: {e}")
+
+    logger.info("Shutdown complete")
 
 class BacktestDataRepository:
     def __init__(self, conn: AsyncConnection):
@@ -411,6 +427,12 @@ if __name__ == "__main__":
             logger.info("Live trading terminated by user.")
         finally:
             if loop:
+                # Cancel all tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                # Run loop briefly to allow cancellation
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 loop.close()
     else:
         # Backtest mode (default)
