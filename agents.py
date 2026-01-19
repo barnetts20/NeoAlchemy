@@ -28,11 +28,11 @@ class CryptoAgent(BaseAgent):
     def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
         # 1. Get the Signal
         signal = self.strategy.generate_signal(data)
-        logger.info(f"SIGNAL: {signal.name}")
+
         # 2. Check current position and broker state
         try:
             current_pos = broker.get_open_position(symbol)
-            qty_owned = float(current_pos.get("qty", 0))
+            qty_owned = float(current_pos.get("qty", 0) or 0)
         except Exception as e:
             # If position doesn't exist or error fetching, assume no position
             logger.debug(f"Could not get position for {symbol}: {e}")
@@ -41,7 +41,8 @@ class CryptoAgent(BaseAgent):
         # 3. Get Account Cash for sizing
         try:
             acc = broker.get_account()
-            available_cash = float(acc["cash"])
+            cash_value = acc.get("cash", 0)
+            available_cash = float(cash_value if cash_value is not None else 0)
         except Exception as e:
             logger.error(f"ERROR | {symbol} | Failed to get account info | reason: {str(e)}")
             return
@@ -81,8 +82,8 @@ class CryptoAgent(BaseAgent):
                             current_price=current_price
                         )
                         
-                        # Extract fee from order response
-                        order_fee = self._extract_fee(order_response)
+                        # Extract fee from order response (default to 0 if extraction fails)
+                        order_fee = self._extract_fee(order_response) or 0.0
                         
                         # Log OPEN (plain text, no color)
                         logger.info(
@@ -103,7 +104,7 @@ class CryptoAgent(BaseAgent):
             else:
                 try:
                     # Get position data (we already have it from earlier)
-                    entry_price = float(current_pos.get("avg_entry_price", 0))
+                    entry_price = float(current_pos.get("avg_entry_price", 0) or 0)
                     
                     # Get position created time if available (for hold duration)
                     # Different brokers may have different field names
@@ -120,19 +121,19 @@ class CryptoAgent(BaseAgent):
                         current_price=current_price
                     )
                     
-                    # Calculate P&L
+                    # Calculate P&L (with safe defaults)
                     entry_value = qty_owned * entry_price
                     exit_value = qty_owned * current_price
                     pnl_dollars = exit_value - entry_value
-                    pnl_percent = (pnl_dollars / entry_value * 100) if entry_value > 0 else 0
+                    pnl_percent = (pnl_dollars / entry_value * 100) if entry_value > 0 else 0.0
                     
-                    # Extract fee from order response
-                    order_fee = self._extract_fee(order_response)
+                    # Extract fee from order response (default to 0 if extraction fails)
+                    order_fee = self._extract_fee(order_response) or 0.0
                     
                     # Determine color and emoji based on P&L
                     emoji, color = LogHelper.determine_pnl_color(pnl_dollars, pnl_percent)
                     
-                    # Build log message
+                    # Build log message (all values guaranteed to be numbers)
                     log_msg = (
                         f"{emoji} CLOSE | {symbol} | SELL {qty_owned:.6f} @ ${current_price:,.2f} "
                         f"(entry: ${entry_price:,.2f}) | "
@@ -141,7 +142,7 @@ class CryptoAgent(BaseAgent):
                     )
                     
                     # Log with color (ONLY CLOSE logs get colored)
-                    logger.info(log_msg)
+                    logger.info(LogHelper.colorize(log_msg, color))
                     
                     # Log account status after closing position
                     self._log_account_status(broker)
@@ -173,20 +174,32 @@ class CryptoAgent(BaseAgent):
         Returns:
             Fee amount in dollars
         """
+        # Handle None or missing response
+        if not order_response:
+            return 0.0
+        
         # Try sim broker first
         fee = order_response.get('_sim_fee_cash', 0)
         
         if fee == 0:
             # For live broker, calculate from filled price and qty
             # This is an approximation - actual fees may vary
-            qty = float(order_response.get('filled_qty', 0))
-            avg_price = float(order_response.get('filled_avg_price', 0))
-            notional = qty * avg_price
-            
-            # Crypto: 0.25% taker fee (Alpaca tier 1)
-            symbol = order_response.get('symbol', '')
-            if '/' in symbol:  # Crypto
-                fee = notional * 0.0025
+            try:
+                filled_qty = order_response.get('filled_qty', 0)
+                avg_price = order_response.get('filled_avg_price', 0)
+                
+                # Handle None values
+                qty = float(filled_qty if filled_qty is not None else 0)
+                price = float(avg_price if avg_price is not None else 0)
+                
+                notional = qty * price
+                
+                # Crypto: 0.25% taker fee (Alpaca tier 1)
+                symbol = order_response.get('symbol', '')
+                if '/' in symbol:  # Crypto
+                    fee = notional * 0.0025
+            except (TypeError, ValueError):
+                fee = 0.0
         
         return float(fee)
     
@@ -239,15 +252,20 @@ class CryptoAgent(BaseAgent):
             acc = broker.get_account()
             positions = broker.get_all_positions()
             
-            equity = float(acc.get('equity', 0))
-            cash = float(acc.get('cash', 0))
-            initial_equity = float(acc.get('initial_capital', equity))  # Fallback to current if not available
+            # Safe extraction with None handling
+            equity_val = acc.get('equity', 0)
+            cash_val = acc.get('cash', 0)
+            initial_val = acc.get('initial_capital', equity_val)
+            
+            equity = float(equity_val if equity_val is not None else 0)
+            cash = float(cash_val if cash_val is not None else 0)
+            initial_equity = float(initial_val if initial_val is not None else equity)
             
             # Calculate equity change percentage
-            equity_change_pct = ((equity - initial_equity) / initial_equity * 100) if initial_equity > 0 else 0
+            equity_change_pct = ((equity - initial_equity) / initial_equity * 100) if initial_equity > 0 else 0.0
             
-            # Calculate total unrealized P&L
-            open_pnl = sum(float(pos.get('unrealized_pl', 0)) for pos in positions)
+            # Calculate total unrealized P&L (with None handling)
+            open_pnl = sum(float(pos.get('unrealized_pl', 0) or 0) for pos in positions)
             
             # Log account status (plain text)
             logger.info(

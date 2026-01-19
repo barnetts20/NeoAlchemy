@@ -132,7 +132,7 @@ class LiveCryptoEngine:
         # Log the incoming bar
         logger.info(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.2f}, volume={bar.volume:.8f}, "
+            f"close=${bar.close:.2f}, volume={bar.volume:.10f}, "
             f"vwap=${bar.vwap if bar.vwap else 'N/A'}, "
             f"time={bar.timestamp}"
         )

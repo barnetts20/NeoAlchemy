@@ -94,7 +94,6 @@ class VWAPReversionStrategy(BaseStrategy):
         
         # Calculate distance from VWAP
         distance_pct = (current_price - vwap) / vwap
-        logger.debug(f"VWAP DISTANCE: {distance_pct:.4f}")
 
         signal = Signal.HOLD
         
@@ -109,4 +108,6 @@ class VWAPReversionStrategy(BaseStrategy):
             self.sell_signals += 1
         
         self.signals_generated += 1
+
+        logger.debug(f"SIGNAL: {signal.name}, VWAP DISTANCE: {distance_pct:.4f}, OPEN THRESHOLD: {self.open_long_threshold}, CLOSE THRESHOLD: {self.close_long_threshold}")
         return signal
