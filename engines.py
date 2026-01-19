@@ -18,7 +18,7 @@ class BacktestEngine:
     def __init__(self, broker, agent: BaseAgent):
         self.broker = broker  # The LocalSimBroker instance
         self.agent = agent
-        self.window_size = agent.get_window_size()
+        self.window_size = agent.window_size
         self.results = {}
 
     def run_backtest(self, symbol: str, df: pd.DataFrame):
