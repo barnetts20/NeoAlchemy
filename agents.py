@@ -1,13 +1,20 @@
 from abc import ABC, abstractmethod
+from typing import List
 import pandas as pd
 from datetime import datetime, timezone
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+from alpaca.data.models import Bar
 from strategies import BaseStrategy, Signal
 from logger import logger, LogHelper
 
 class BaseAgent(ABC):
     def __init__(self, strategy: BaseStrategy):
         self.strategy = strategy
+
+    @abstractmethod
+    async def _on_bar(self, bar: 'Bar'):
+        """Handle incoming bar data for both live trading and backtesting."""
+        pass
 
     @abstractmethod
     def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
@@ -24,8 +31,124 @@ class CryptoAgent(BaseAgent):
     def __init__(self, strategy: BaseStrategy, commitment: float = 0.5):
         super().__init__(strategy)
         self.commitment = commitment  # Fraction of cash to use per trade (0.0 to 1.0)
+        self.broker = None  # Will be set by engine
+        self.symbols = []   # Will be set by engine
+        self.stream = None  # Will be set by engine (for live trading)
+        self.bar_data = {}  # For live trading bar buffering
+        self.is_running = False
+
+    def set_broker(self, broker):
+        """Set the broker for this agent"""
+        self.broker = broker
+
+    def set_symbols(self, symbols: List[str]):
+        """Set the symbols this agent should trade"""
+        self.symbols = symbols
+        # Initialize bar data buffer for each symbol
+        self.bar_data = {symbol: pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
+                        for symbol in symbols}
+
+    def set_stream(self, stream):
+        """Set the data stream for live trading"""
+        self.stream = stream
+
+    async def start(self):
+        """Start the agent - subscribe to data streams"""
+        if not self.broker:
+            raise ValueError("Broker not set for agent")
+        if not self.symbols:
+            raise ValueError("Symbols not set for agent")
+
+        self.is_running = True
+        logger.info(f"Starting CryptoAgent with symbols: {self.symbols}")
+
+        if self.stream:
+            # Live trading mode - subscribe to real-time bars
+            logger.info("Subscribing to live data streams...")
+            self.stream.subscribe_bars(self._on_bar, *self.symbols)
+            await self.stream._run_forever()
+        else:
+            # Backtest mode - agent will receive bars from engine via handle_bar
+            logger.info("Agent ready for backtest mode")
+
+    def stop(self):
+        """Stop the agent"""
+        self.is_running = False
+        logger.info("CryptoAgent stopped")
+
+    async def _on_bar(self, bar: 'Bar'):
+        """Handle incoming live bar data"""
+        symbol = bar.symbol
+
+        # Log the incoming bar
+        vwap_display = f"${bar.vwap:.6f}" if bar.vwap and bar.vwap > 0 else "N/A"
+        logger.debug(
+            f"BAR RECEIVED - {symbol}: "
+            f"close=${bar.close:.2f}, volume={bar.volume:.8f}, "
+            f"vwap={vwap_display}, "
+            f"time={bar.timestamp}"
+        )
+
+        # Convert bar to dataframe row
+        new_row = pd.DataFrame([{
+            'ts': bar.timestamp,
+            'open': bar.open,
+            'high': bar.high,
+            'low': bar.low,
+            'close': bar.close,
+            'volume': bar.volume,
+            'vwap': bar.vwap
+        }])
+
+        # Update bar buffer
+        if self.bar_data[symbol].empty:
+            self.bar_data[symbol] = new_row
+        else:
+            # More efficient: convert to dict list, append, recreate
+            data_list = self.bar_data[symbol].to_dict('records')
+            data_list.append(new_row.iloc[0].to_dict())
+            self.bar_data[symbol] = pd.DataFrame(data_list)
+
+        # Keep only recent data (sliding window)
+        max_bars = self.window_size * 3
+        if len(self.bar_data[symbol]) > max_bars:
+            self.bar_data[symbol] = self.bar_data[symbol].iloc[-max_bars:].reset_index(drop=True)
+
+        # Check if we have enough data to evaluate
+        if len(self.bar_data[symbol]) >= self.window_size:
+            logger.debug(f"EVALUATING strategy for {symbol}...")
+            self._evaluate_symbol(symbol)
+        else:
+            logger.debug(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
+
+    def _evaluate_symbol(self, symbol: str, bar_window: pd.DataFrame = None):
+        """Evaluate strategy for a specific symbol"""
+        try:
+            # Use provided bar_window (backtest) or construct from buffer (live)
+            if bar_window is not None:
+                # Backtest mode - use provided window
+                data = bar_window
+            else:
+                # Live mode - construct window from buffer
+                data = self.bar_data[symbol].set_index('ts')
+
+            if len(data) < self.window_size:
+                logger.warning(f"Not enough data for {symbol}: {len(data)}/{self.window_size}")
+                return
+
+            # Use the last window_size bars for strategy evaluation
+            window = data.iloc[-self.window_size:] if len(data) >= self.window_size else data
+
+            # Get timestamp from the window data (always available)
+            timestamp = window.index[-1]
+
+            # Call the existing handle_tick method with timestamp
+            self.handle_tick(symbol, window, self.broker, timestamp)
+
+        except Exception as e:
+            logger.error(f"ERROR evaluating {symbol}: {e}", exc_info=True)
     
-    def handle_tick(self, symbol: str, data: pd.DataFrame, broker):
+    def handle_tick(self, symbol: str, data: pd.DataFrame, broker, timestamp=None):
         # 1. Get the Signal
         signal = self.strategy.generate_signal(data)
 
@@ -53,10 +176,14 @@ class CryptoAgent(BaseAgent):
             return
         
         current_price = float(data['close'].iloc[-1])
-        
-        # Validate price is positive
-        if current_price <= 0:
-            logger.warning(f"Invalid price for {symbol}: {current_price}")
+
+
+
+        # Safeguard against extremely small prices that would result in huge positions
+        # For crypto, reasonable minimum price might be $0.000001 (1 millionth of a dollar)
+        MIN_REASONABLE_PRICE = 1e-6
+        if current_price < MIN_REASONABLE_PRICE:
+            logger.warning(f"Price too low for {symbol}: ${current_price:.8f} - skipping to avoid huge position sizes")
             return
         
         # Validate commitment is reasonable
@@ -69,25 +196,29 @@ class CryptoAgent(BaseAgent):
             if qty_owned > 0:
                 logger.debug(f"{symbol} | OPEN_LONG signal ignored - already have position (qty: {qty_owned:.6f})")
             else:
+                # Calculate position size
                 buy_qty = (available_cash * self.commitment) / current_price
+
                 if buy_qty > 0:
                     try:
                         # Submit order
                         order_response = broker.submit_order(
                             symbol=symbol,
-                            qty=buy_qty, 
+                            qty=buy_qty,
                             side=OrderSide.BUY,
                             order_type=OrderType.MARKET,
                             time_in_force=TimeInForce.GTC,
-                            current_price=current_price
+                            current_price=current_price,
+                            created_at=timestamp.isoformat() if timestamp else None
                         )
                         
                         # Extract fee from order response (default to 0 if extraction fails)
                         order_fee = self._extract_fee(order_response) or 0.0
                         
                         # Log OPEN (plain text, no color)
+                        timestamp_str = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] " if timestamp else ""
                         logger.info(LogHelper.colorize(
-                            f"💰 OPEN | {symbol} | BUY {buy_qty:.6f} @ ${current_price:,.2f} | "
+                            f"{timestamp_str}💰 OPEN | {symbol} | BUY {buy_qty:.6f} @ ${current_price:,.8f} | "
                             f"value: ${buy_qty * current_price:,.2f} | fee: ${order_fee:.2f}", "PURPLE")
                         )
                         
@@ -109,7 +240,7 @@ class CryptoAgent(BaseAgent):
                     # Get position created time if available (for hold duration)
                     # Different brokers may have different field names
                     created_at = current_pos.get('created_at') or current_pos.get('submitted_at')
-                    hold_duration = self._calculate_hold_duration(created_at) if created_at else "unknown"
+                    hold_duration = self._calculate_hold_duration(created_at, timestamp) if created_at else "unknown"
                     
                     # Submit order
                     order_response = broker.submit_order(
@@ -121,21 +252,22 @@ class CryptoAgent(BaseAgent):
                         current_price=current_price
                     )
                     
-                    # Calculate P&L (with safe defaults)
-                    entry_value = qty_owned * entry_price
-                    exit_value = qty_owned * current_price
-                    pnl_dollars = exit_value - entry_value
-                    pnl_percent = (pnl_dollars / entry_value * 100) if entry_value > 0 else 0.0
-                    
                     # Extract fee from order response (default to 0 if extraction fails)
                     order_fee = self._extract_fee(order_response) or 0.0
+
+                    # Calculate P&L including fees (net return)
+                    entry_value = qty_owned * entry_price
+                    exit_value = qty_owned * current_price
+                    pnl_dollars = (exit_value - order_fee) - entry_value  # Subtract exit fee
+                    pnl_percent = (pnl_dollars / entry_value * 100) if entry_value > 0 else 0.0
                     
                     # Determine color and emoji based on P&L
                     emoji, color = LogHelper.determine_pnl_color(pnl_dollars, pnl_percent)
                     
                     # Build log message (all values guaranteed to be numbers)
+                    timestamp_str = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] " if timestamp else ""
                     log_msg = (
-                        f"{emoji} CLOSE | {symbol} | SELL {qty_owned:.6f} @ ${current_price:,.2f} "
+                        f"{timestamp_str}{emoji} CLOSE | {symbol} | SELL {qty_owned:.6f} @ ${current_price:,.8f} "
                         f"(entry: ${entry_price:,.2f}) | "
                         f"P&L: {LogHelper.format_pnl(pnl_dollars, pnl_percent)} | "
                         f"fee: ${order_fee:.2f} | held: {hold_duration}"
@@ -194,16 +326,16 @@ class CryptoAgent(BaseAgent):
                 
                 notional = qty * price
                 
-                # Crypto: 0.25% taker fee (Alpaca tier 1)
+                # Crypto: 0.6% overall fee (Alpaca tier 1)
                 symbol = order_response.get('symbol', '')
                 if '/' in symbol:  # Crypto
-                    fee = notional * 0.0025
+                    fee = notional * 0.006
             except (TypeError, ValueError):
                 fee = 0.0
         
         return float(fee)
     
-    def _calculate_hold_duration(self, created_at) -> str:
+    def _calculate_hold_duration(self, created_at, current_timestamp) -> str:
         """
         Calculate how long a position was held based on position created timestamp
         
@@ -227,8 +359,9 @@ class CryptoAgent(BaseAgent):
             # Ensure timezone aware
             if open_time.tzinfo is None:
                 open_time = open_time.replace(tzinfo=timezone.utc)
-            
-            close_time = datetime.now(timezone.utc)
+
+            # Use the provided current timestamp (from the bar being processed)
+            close_time = current_timestamp
             duration_seconds = (close_time - open_time).total_seconds()
             
             # Format as hours or minutes
@@ -244,7 +377,7 @@ class CryptoAgent(BaseAgent):
     def _log_account_status(self, broker):
         """
         Log account status after position changes (plain text, no color)
-        
+
         Args:
             broker: Broker instance
         """
@@ -270,7 +403,7 @@ class CryptoAgent(BaseAgent):
             # Log account status (plain text)
             logger.info(LogHelper.colorize(
                 f"🏦 ACCOUNT | Equity: ${equity:,.2f} ({'+' if equity_change_pct >= 0 else ''}{equity_change_pct:.2f}%) | "
-                f"Cash: ${cash:,.2f} | Positions: {len(positions)} | Open P&L: {'+' if open_pnl >= 0 else ''}${open_pnl:.2f}", 
+                f"Cash: ${cash:,.2f} | Positions: {len(positions)} | Open P&L: {'+' if open_pnl >= 0 else ''}${open_pnl:.2f}",
                 'BLUE')
             )
             # Log each position indented under account status
@@ -283,8 +416,8 @@ class CryptoAgent(BaseAgent):
                     unrealized_pl = float(pos.get('unrealized_pl', 0) or 0)
                     unrealized_plpc = float(pos.get('unrealized_plpc', 0) or 0) * 100  # Convert to percentage
                     
-                    logger.info(LogHelper.colorize(
-                        f"    ↳ {symbol}: {qty:.6f} @ ${current_price:.2f} "
+                    logger.debug(LogHelper.colorize(
+                        f"    ↳ {symbol}: {qty:.6f} @ ${current_price:.8f} "
                         f"(entry: ${avg_entry:.2f}) | "
                         f"P&L: {'+' if unrealized_pl >= 0 else ''}${unrealized_pl:.2f} "
                         f"({'+' if unrealized_plpc >= 0 else ''}{unrealized_plpc:.2f}%)", 

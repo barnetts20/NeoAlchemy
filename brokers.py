@@ -171,7 +171,7 @@ class LocalSimBroker:
         self.current_prices = {}  # The "Tape": { symbol: price }
         
         # Fee Constants (Alpaca / Regulatory Defaults)
-        self.CRYPTO_FEE_RATE = 0.0025  # 0.25% Taker Fee
+        self.CRYPTO_FEE_RATE = 0.006  # 0.6% Taker Fee (more realistic)
         self.SEC_FEE_RATE = 8.00 / 1_000_000  # $8 per million (Sells only)
         self.TAF_RATE = 0.000166  # Per share (Sells only)
         self.TAF_MAX = 8.30
@@ -285,7 +285,8 @@ class LocalSimBroker:
             "unrealized_pl": unrealized_pl,
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
-            "change_today": 0.0 # Hard to calc without 'prev_close'
+            "change_today": 0.0, # Hard to calc without 'prev_close'
+            "created_at": pos_data.get('created_at')  # Position creation timestamp
         }
 
     def get_all_positions(self):
@@ -354,7 +355,7 @@ class LocalSimBroker:
             else:
                 filled_qty = qty
 
-            self._update_position(symbol, filled_qty, fill_price, OrderSide.BUY)
+            self._update_position(symbol, filled_qty, fill_price, OrderSide.BUY, kwargs.get('created_at'))
 
         elif side == OrderSide.SELL:
             pos = self.positions.get(symbol)
@@ -415,20 +416,25 @@ class LocalSimBroker:
         
         return order
 
-    def _update_position(self, symbol, qty, price, side):
+    def _update_position(self, symbol, qty, price, side, created_at=None):
         # Default state for a new position
         pos = self.positions.get(symbol, {
-            "symbol": symbol, 
-            "qty": 0.0, 
+            "symbol": symbol,
+            "qty": 0.0,
             "avg_entry_price": 0.0,
-            "asset_class": AssetClass.CRYPTO if self._is_crypto(symbol) else AssetClass.US_EQUITY
+            "asset_class": AssetClass.CRYPTO if self._is_crypto(symbol) else AssetClass.US_EQUITY,
+            "created_at": None  # Will be set on first position open
         })
         
         if side == OrderSide.BUY:
             # qty is the net amount (already reduced by fee if crypto)
             current_total_cost = pos['qty'] * pos['avg_entry_price']
             new_qty = pos['qty'] + qty
-            
+
+            # Set created_at timestamp if this is the first position open
+            if pos['qty'] == 0.0 and new_qty > 0:
+                pos['created_at'] = created_at or datetime.now().isoformat()
+
             # Weighted average based on what was actually received
             # We use the market price for the cost basis of the new shares/coins
             if new_qty > 0:

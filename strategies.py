@@ -55,8 +55,8 @@ class VWAPReversionStrategy(BaseStrategy):
         params = parameters or {}
         super().__init__(1, params)
         self.lookback = self.window_size
-        self.open_long_threshold = parameters.get('open_long_threshold', -0.004)
-        self.close_long_threshold = parameters.get('close_long_threshold', 0.003)
+        self.open_long_threshold = parameters.get('open_long_threshold', -0.0025)
+        self.close_long_threshold = parameters.get('close_long_threshold', 0.0025)
         self.signals_generated = 0
         self.buy_signals = 0
         self.sell_signals = 0
@@ -86,11 +86,12 @@ class VWAPReversionStrategy(BaseStrategy):
         latest = valid_bars.iloc[-1]
         current_price = latest['close']
         vwap = latest['vwap']
-        
-        # Validate vwap is not zero to avoid division by zero
-        if vwap == 0 or pd.isna(vwap):
-            logger.warning("VWAP is zero or NaN, cannot calculate signal")
-            return Signal.HOLD
+
+        # If VWAP is still 0 (shouldn't happen due to filtering, but safeguard)
+        # or if it's somehow NaN, use current price as fallback
+        if vwap == 0 or pd.isna(vwap) or vwap is None:
+            logger.debug(f"VWAP is invalid ({vwap}), using current price as fallback")
+            vwap = current_price
         
         # Calculate distance from VWAP
         distance_pct = (current_price - vwap) / vwap

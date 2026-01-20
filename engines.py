@@ -21,52 +21,218 @@ class BacktestEngine:
         self.window_size = agent.window_size
         self.results = {}
 
-    def run_backtest(self, symbol: str, df: pd.DataFrame):
-        """Runs the strategy against a single symbol's dataframe."""
-        # Validate input
-        if df is None or len(df) == 0:
-            raise ValueError(f"Empty dataframe provided for {symbol}")
-        if len(df) < self.window_size:
-            raise ValueError(f"Insufficient data for {symbol}: {len(df)} rows, need at least {self.window_size}")
-        if 'close' not in df.columns:
-            raise ValueError(f"Dataframe for {symbol} missing required 'close' column")
-        
-        history = []
-        
-        # Iterative Simulation (The Time Machine)
-        # Start from window_size - 1 so window_size=1 executes on first tick (index 0)
-        for i in range(self.window_size - 1, len(df)):
-            # slice of data: 'window' represents what the agent 'knows' at this moment
-            # Use exactly window_size bars (not window_size + 1)
-            window = df.iloc[i - self.window_size + 1 : i + 1]
-            current_price = window['close'].iloc[-1]
-            timestamp = df.index[i]
+    # Old per-symbol backtest method removed - using chunked approach instead
 
-            # 1. Update Broker's internal tape for current equity/fill calcs
-            self.broker.update_price(symbol, current_price)
+    async def run_backtest(self, repo: 'BacktestDataRepository', symbols: List[str], timeframe: str, chunk_days: int = 31, reverse_time: bool = False):
+        """
+        Runs memory-efficient backtest by processing data in time chunks.
+        More closely mirrors live trading behavior with randomized symbol processing.
 
-            # 2. Agent processes the tick (Passing symbol-agnostically)
-            self.agent.handle_tick(symbol, window, self.broker)
+        Args:
+            repo: BacktestDataRepository instance for data access
+            symbols: List of symbols to backtest
+            timeframe: Timeframe string (e.g., "1M")
+            chunk_days: Number of days to process at once (memory management)
+            reverse_time: If True, process timestamps in reverse chronological order
+                         (future to past) to test for trend-following vs predictive strategies
+        """
+        import random
+        from datetime import datetime, timedelta
 
-            # 3. Capture state for analytics
-            acc = self.broker.get_account()
-            history.append({
-                "timestamp": timestamp,
-                "cash": float(acc["cash"]),
-                "equity": float(acc["equity"]),
-                "price": current_price
-            })
-            
-        self.results[symbol] = pd.DataFrame(history).set_index("timestamp")
-        return self.results[symbol]
+        # For simplicity, let's process from a reasonable start date
+        # In production, you'd want to query min/max dates more efficiently
+        start_date = datetime(2024, 1, 1)  # Conservative start
+        end_date = datetime.now()
+
+        current_date = start_date
+        chunk_size = timedelta(days=chunk_days)
+
+        # Initialize results tracking
+        self.results = {}
+
+        while current_date < end_date:
+            chunk_end = min(current_date + chunk_size, end_date)
+
+            logger.info(f"Processing chunk: {current_date.date()} to {chunk_end.date()}")
+
+            # Load data for this chunk only
+            chunk_data = {}
+            active_symbols = []
+
+            for symbol in symbols:
+                try:
+                    # Load only data for this date range
+                    df = await self._load_symbol_chunk(repo, symbol, timeframe, current_date, chunk_end)
+                    if df is not None and len(df) >= self.window_size:
+                        chunk_data[symbol] = df
+                        active_symbols.append(symbol)
+                        logger.debug(f"Loaded {len(df)} bars for {symbol} in chunk")
+                except Exception as e:
+                    logger.debug(f"Skipping {symbol} in chunk: {e}")
+
+            if not active_symbols:
+                logger.debug("No active symbols in this chunk, skipping")
+                current_date = chunk_end
+                continue
+
+            # Process this chunk timestamp by timestamp
+            await self._process_chunk_timestamps(chunk_data, active_symbols, reverse_time)
+
+            current_date = chunk_end
+
+        logger.info("Real-time backtest completed")
+        return self.results
+
+    async def _load_symbol_chunk(self, repo: 'BacktestDataRepository', symbol: str, timeframe: str,
+                                start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Load data for a specific symbol and date range chunk."""
+        async with await get_conn() as conn:
+            table = repo.table_map["crypto"][timeframe]
+            query = f"""
+                SELECT ts, open, high, low, close, volume, vwap
+                FROM {table}
+                WHERE symbol = %s AND ts >= %s AND ts < %s
+                ORDER BY ts ASC;
+            """
+            async with conn.cursor() as cur:
+                await cur.execute(query, (symbol, start_date, end_date))
+                rows = await cur.fetchall()
+
+                if not rows:
+                    return None
+
+                df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
+                df.set_index('ts', inplace=True)
+                return df
+
+    async def _process_chunk_timestamps(self, chunk_data: Dict[str, pd.DataFrame], symbols: List[str], reverse_time: bool = False):
+        """Process all timestamps in a data chunk."""
+        import random
+
+        # Get all unique timestamps in this chunk
+        all_timestamps = set()
+        for df in chunk_data.values():
+            all_timestamps.update(df.index)
+
+        # Sort timestamps based on reverse_time flag
+        if reverse_time:
+            sorted_timestamps = sorted(all_timestamps, reverse=True)  # Future to past
+            logger.debug(f"Processing chunk in REVERSE time order: {len(sorted_timestamps)} timestamps")
+        else:
+            sorted_timestamps = sorted(all_timestamps)  # Past to future (normal)
+
+        for timestamp in sorted_timestamps:
+            # Find symbols that have data for this timestamp
+            symbols_at_time = []
+            for symbol in symbols:
+                if symbol in chunk_data and timestamp in chunk_data[symbol].index:
+                    symbols_at_time.append(symbol)
+
+            if not symbols_at_time:
+                continue
+
+            # Randomize order to simulate real-time bar arrival
+            random.shuffle(symbols_at_time)
+
+            logger.debug(f"Processing {len(symbols_at_time)} symbols at {timestamp}")
+
+            # Create synthetic Alpaca bars for each symbol at this timestamp
+            bars_at_time = []
+            for symbol in symbols_at_time:
+                df = chunk_data[symbol]
+                idx = df.index.get_loc(timestamp)
+
+                # Ensure we have enough history for the window (skip if not)
+                if idx < self.window_size - 1:
+                    continue
+
+                # Get the current bar data (latest candle in window)
+                current_bar = df.iloc[idx]
+
+                # VALIDATE PRICE DATA
+                if current_bar['close'] <= 0:
+                    logger.warning(f"Invalid price at {timestamp}: {current_bar['close']}. Skipping {symbol}.")
+                    continue
+
+                # Check for unrealistic price jumps (from previous bar)
+                if idx > 0:
+                    prev_bar = df.iloc[idx-1]
+                    if prev_bar['close'] > 0:
+                        change_pct = abs((current_bar['close'] - prev_bar['close']) / prev_bar['close'])
+                        if change_pct > 5.0:  # 500% movement in one bar
+                            logger.warning(
+                                f"Extreme price movement at {timestamp}: "
+                                f"{change_pct:.1%} from ${prev_bar['close']:.9f} to ${current_bar['close']:.9f}. "
+                                f"Skipping {symbol}."
+                            )
+                            continue
+
+                # Create synthetic Bar-like object (mimics Alpaca Bar interface)
+                class MockBar:
+                    def __init__(self, symbol, timestamp, open_, high, low, close, volume, vwap):
+                        self.symbol = symbol
+                        self.timestamp = timestamp
+                        self.open = open_
+                        self.high = high
+                        self.low = low
+                        self.close = close
+                        self.volume = volume
+                        self.vwap = vwap
+
+                # Handle VWAP properly - use close price only if VWAP is missing/NaN
+                # Don't override legitimate zero VWAP (which can happen with very low volume)
+                vwap_value = current_bar.get('vwap')
+                if vwap_value is None or pd.isna(vwap_value):
+                    vwap_value = current_bar['close']  # Use close price as fallback for missing data
+
+                synthetic_bar = MockBar(
+                    symbol=symbol,
+                    timestamp=timestamp,
+                    open_=current_bar['open'],
+                    high=current_bar['high'],
+                    low=current_bar['low'],
+                    close=current_bar['close'],
+                    volume=current_bar['volume'],
+                    vwap=vwap_value
+                )
+
+                bars_at_time.append(synthetic_bar)
+
+            # Randomize bar order and feed to agent (EXACT same path as live trading)
+            random.shuffle(bars_at_time)
+
+            for bar in bars_at_time:
+                logger.debug(LogHelper.colorize(
+                    f"BACKTEST BAR - {bar.symbol}: "
+                    f"close=${bar.close:.9f}, volume={bar.volume:.9f}, "
+                    f"vwap=${bar.vwap:.9f}, "
+                    f"time={bar.timestamp}",
+                    'GREY')
+                )
+
+                # Call agent's _on_bar method - EXACT same path as live trading!
+                await self.agent._on_bar(bar)
+
+                # Record results after each bar (for P&L tracking)
+                acc = self.broker.get_account()
+                symbol = bar.symbol
+                if symbol not in self.results:
+                    self.results[symbol] = []
+
+                self.results[symbol].append({
+                    "timestamp": bar.timestamp,
+                    "cash": float(acc["cash"]),
+                    "equity": float(acc["equity"]),
+                    "price": bar.close
+                })
 
 
 class LiveCryptoEngine:
     """
-    Live trading engine that streams real-time data from Alpaca
-    and executes trades through LiveAlpacaBroker
+    Live trading engine that orchestrates live trading.
+    Delegates all trading logic and data subscriptions to the agent.
     """
-    
+
     def __init__(
         self,
         broker: LiveAlpacaBroker,
@@ -78,130 +244,78 @@ class LiveCryptoEngine:
         self.agent = agent
         self.symbols = symbols
         self.asset_type = asset_type
-        self.window_size = agent.window_size
-        
-        # Get the appropriate stream from project_context (already initialized with credentials)
+
+        # Get the appropriate stream from project_context
         if asset_type == "crypto":
             from project_context import CRYPTO_LIVE_DATA_STREAM
-            self.stream = CRYPTO_LIVE_DATA_STREAM
+            stream = CRYPTO_LIVE_DATA_STREAM
         else:
             from project_context import STOCK_LIVE_DATA_STREAM
-            self.stream = STOCK_LIVE_DATA_STREAM
-        
-        # Data buffer for each symbol - stores recent bars
-        self.bar_data: Dict[str, pd.DataFrame] = {
-            symbol: pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
-            for symbol in symbols
-        }
+            stream = STOCK_LIVE_DATA_STREAM
 
-        # Running state
-        self.is_running = False
-        self.last_evaluation = {}
-        
+        # Configure the agent with broker, symbols, and stream
+        agent.set_broker(broker)
+        agent.set_symbols(symbols)
+        agent.set_stream(stream)
+
     async def start(self):
-        """Start the live trading system"""
+        """Start the live trading system by starting the agent"""
         logger.info(f"Starting live engine ({self.asset_type}) with symbols: {self.symbols}")
-        logger.info(f"Window size: {self.window_size}")
-        
-        # Subscribe to bars for all symbols
-        self.stream.subscribe_bars(self._on_bar, *self.symbols)
-        self.is_running = True
-        
+
         # Log initial account status
         try:
             account = self.broker.get_account()
-            logger.info(f"Account equity: ${float(account.get('equity', 0)):,.2f}")
-            logger.info(f"Buying power: ${float(account.get('buying_power', 0)):,.2f}")
-            logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
+            logger.info(f"🏦 Account equity: ${float(account.get('equity', 0)):,.2f}")
+            logger.info(f"💰 Buying power: ${float(account.get('buying_power', 0)):,.2f}")
+            logger.info(f"💵 Cash: ${float(account.get('cash', 0)):,.2f}")
         except Exception as e:
             logger.warning(f"Could not fetch account info: {e}")
-        
-        # Start the stream
+
+        # Start the agent - it handles all subscriptions and trading logic
         try:
-            logger.info("Starting data stream...")
-            await self.stream._run_forever()
+            await self.agent.start()
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
         finally:
             await self.shutdown()
-    
-    async def _on_bar(self, bar: Bar):
-        """Callback when new bar data is received"""
-        symbol = bar.symbol
-        
-        # Log the incoming bar
-        vwap_value = bar.vwap if bar.vwap else bar.close
-        logger.debug(LogHelper.colorize(
-            f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.9f}, volume={bar.volume:.9f}, "
-            f"vwap=${vwap_value:.9f}, "
-            f"time={bar.timestamp}",
-            'GREY')
-        )
-        
-        # Convert bar to dataframe row (include vwap!)
-        new_row = pd.DataFrame([{
-            'ts': bar.timestamp,
-            'open': bar.open,
-            'high': bar.high,
-            'low': bar.low,
-            'close': bar.close,
-            'volume': bar.volume,
-            'vwap': bar.vwap  # Add VWAP from Alpaca
-        }])
-        
-        # Append to buffer (use list accumulation for efficiency)
-        # Convert to list of dicts, append, then recreate DataFrame
-        if self.bar_data[symbol].empty:
-            self.bar_data[symbol] = new_row
-        else:
-            # More efficient: convert to dict list, append, recreate
-            data_list = self.bar_data[symbol].to_dict('records')
-            data_list.append(new_row.iloc[0].to_dict())
-            self.bar_data[symbol] = pd.DataFrame(data_list)
-        
-        # Keep only the data we need (window_size + some buffer)
-        max_bars = self.window_size * 3  # Keep 3x window size for safety
-        if len(self.bar_data[symbol]) > max_bars:
-            self.bar_data[symbol] = self.bar_data[symbol].iloc[-max_bars:].reset_index(drop=True)
-        
-        logger.debug(f"Buffer size for {symbol}: {len(self.bar_data[symbol])}/{self.window_size} bars needed")
-        
-        # Check if we have enough data to evaluate
-        if len(self.bar_data[symbol]) >= self.window_size:
-            await self._evaluate_symbol(symbol)
-        else:
-            logger.debug(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
 
-    async def _evaluate_symbol(self, symbol: str):
-        """Evaluate strategy for a specific symbol"""
+    async def shutdown(self):
+        """Gracefully shutdown the engine"""
+        logger.info("Shutting down live engine...")
+        self.agent.stop()
+
+        # Log final positions and account state
         try:
-            # Validate data exists
-            if symbol not in self.bar_data or len(self.bar_data[symbol]) == 0:
-                logger.warning(f"No data available for {symbol}")
-                return
-            
-            # Get the window of data (same as backtest)
-            df = self.bar_data[symbol].set_index('ts')
-            
-            # Validate required columns
-            required_cols = ['close']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                logger.warning(f"Missing required columns for {symbol}: {missing_cols}")
-                return
-            
-            # Use exactly window_size bars (not window_size + 1)
-            window = df.iloc[-self.window_size:]
-            
-            if len(window) < self.window_size:
-                logger.warning(f"Not enough data for {symbol}: {len(window)}/{self.window_size}")
-                return
-                        
-            # Agent processes the tick (same interface as backtest)
-            self.agent.handle_tick(symbol, window, self.broker)                
+            account = self.broker.get_account()
+            positions = self.broker.get_all_positions()
+
+            logger.info("=" * 60)
+            logger.info("FINAL ACCOUNT STATE")
+            logger.info("=" * 60)
+            logger.info(f"🏦 Equity: ${float(account.get('equity', 0)):,.2f}")
+            logger.info(f"💵 Cash: ${float(account.get('cash', 0)):,.2f}")
+            logger.info(f"💰 Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
+            logger.info(f"📊 Open Positions: {len(positions)}")
+
+            if positions:
+                logger.info("\nPositions:")
+                for pos in positions:
+                    logger.info(
+                        f"  {pos['symbol']}: {pos['qty']} @ "
+                        f"${float(pos['current_price']):.8f} "
+                        f"(P&L: ${float(pos['unrealized_pl']):.2f})"
+                    )
+
+            logger.info("=" * 60)
+
+            self.broker.close_all_positions(True)
+
         except Exception as e:
-            logger.error(f"ERROR evaluating {symbol}: {e}", exc_info=True)
+            logger.error(f"Error getting final state: {e}")
+
+        logger.info("Shutdown complete")
+    
+    # All bar processing is now handled directly by the agent
     
 async def shutdown(self):
     """Gracefully shutdown the engine"""
@@ -293,68 +407,93 @@ class BacktestDataRepository:
             return df
 
 
-async def run_standalone_backtest(asset_type="crypto"):
+async def run_standalone_backtest(reverse_time: bool = False):
     """
-    Runs a full matrix backtest against the database.
-    Resets the broker for every symbol/timeframe combination.
+    Runs a memory-efficient backtest against the database.
+    Processes data in time chunks to minimize memory usage while maintaining
+    real-time simulation behavior with randomized symbol processing order.
+
+    Args:
+        reverse_time: If True, process timestamps in reverse chronological order
+                     (future to past) to test for trend-following vs predictive strategies
+
+    Usage:
+        python engines.py                    # Normal forward time backtest
+        python engines.py --reverse          # Reverse time backtest
+        python engines.py -r                 # Reverse time backtest (short flag)
     """
     async with await get_conn() as conn:
         repo = BacktestDataRepository(conn)
-        symbols = await repo.get_active_symbols(asset_type)
-        
-        # Match these exactly to your table_map keys
+        symbols = await repo.get_active_symbols("crypto")
+
+        # Only support 1M timeframe for now (crypto-focused)
         timeframes = ["1M"]
-        
-        # results[symbol][timeframe] = final_equity
         matrix_results = {}
 
-        for symbol in symbols:
-            matrix_results[symbol] = {}
-            for tf in timeframes:
-                # 1. Fresh Start for every cell in the matrix
-                broker = LocalSimBroker(initial_cash=10000.0)
-                strategy = VWAPReversionStrategy(parameters={})
-                agent = CryptoAgent(strategy) 
-                engine = BacktestEngine(broker, agent)
+        for tf in timeframes:
+            window = 31
+            if(tf == "5M"):
+                window *= 5
+            elif(tf == "1H"):
+                window *= 60
+            elif(tf == "1D"):
+                window *= 60 * 24
 
-                try:
-                    # 2. Fetch from DB (e.g., crypto_candles_1h)
-                    df = await repo.fetch_history(asset_type, symbol, tf)
-                    
-                    # Consistent validation: need at least window_size rows (not <=)
-                    if df is None or len(df) < engine.window_size:
-                        matrix_results[symbol][tf] = "NO_DATA"
-                        continue
+            mode = "REVERSE TIME" if reverse_time else "FORWARD TIME"
+            logger.info(f"Starting {mode} backtest for {len(symbols)} crypto symbols on {tf}")
 
-                    # 3. Run Simulation
-                    logger.info(f"Simulating {symbol} on {tf} ({len(df)} bars)...")
-                    engine.run_backtest(symbol, df)
-                    
-                    # 4. Extract Result
-                    final_equity = engine.results[symbol]['equity'].iloc[-1]
-                    matrix_results[symbol][tf] = round(final_equity, 2)
-                    # Log signal summary
-                    hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals
-                    logger.info(
-                        f"{symbol} - Total signals: {strategy.signals_generated}, "
-                        f"OPEN_LONG: {strategy.buy_signals}, CLOSE_LONG: {strategy.sell_signals}, "
-                        f"HOLD: {hold_count}"
-                    )
+            # Fresh broker and agent for this timeframe (shared across all symbols)
+            broker = LocalSimBroker(initial_cash=10000.0)
+            strategy = VWAPReversionStrategy(parameters={})
+            agent = CryptoAgent(strategy)
 
-                except Exception as e:
-                    logger.error(f"Failed {symbol} @ {tf}: {e}")
-                    matrix_results[symbol][tf] = "ERROR"
+            # Configure agent for backtest mode (no stream)
+            agent.set_broker(broker)
+            agent.set_symbols(symbols)
+            agent.is_running = True  # Enable backtest mode
+
+            engine = BacktestEngine(broker, agent)
+
+            try:
+                # Run memory-efficient real-time simulation (7-day chunks)
+                await engine.run_backtest(repo, symbols, tf, window, reverse_time=reverse_time)
+
+                # Process results for each symbol
+                for symbol in symbols:
+                    if symbol in engine.results and engine.results[symbol]:
+                        # Convert list of dicts to DataFrame and get final equity
+                        df_results = pd.DataFrame(engine.results[symbol]).set_index('timestamp')
+                        if not df_results.empty:
+                            final_equity = df_results['equity'].iloc[-1]
+                            matrix_results[symbol] = {tf: round(final_equity, 2)}
+                        else:
+                            matrix_results[symbol] = {tf: "NO_DATA"}
+                    else:
+                        matrix_results[symbol] = {tf: "NO_DATA"}
+
+                # Log signal summary
+                hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals
+                logger.info(
+                    f"Backtest {tf} - Total signals: {strategy.signals_generated}, "
+                    f"OPEN_LONG: {strategy.buy_signals}, CLOSE_LONG: {strategy.sell_signals}, "
+                    f"HOLD: {hold_count}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed backtest for {tf}: {e}")
+                for symbol in symbols:
+                    matrix_results.setdefault(symbol, {})[tf] = "ERROR"
 
         # --- Report Rendering ---
         print("\n" + "="*65)
-        print(f"BEYOND-ALGO BACKTEST MATRIX: {asset_type.upper()}")
+        print("BEYOND-ALGO CRYPTO BACKTEST MATRIX")
         print("="*65)
-        
+
         # Header Row
         header = f"{'Symbol':<15}" + "".join([f"{tf:>12}" for tf in timeframes])
         print(header)
         print("-" * len(header))
-        
+
         # Data Rows
         for symbol, tfs in matrix_results.items():
             row = f"{symbol:<15}"
@@ -411,13 +550,6 @@ if __name__ == "__main__":
         asset_type = "crypto"  # Default to crypto
         symbols = ["AAVE/USD", "AVAX/USD", "BAT/USD", "BCH/USD", "BTC/USD", "CRV/USD", "DOGE/USD", "DOT/USD", "ETH/USD", "GRT/USD", "LINK/USD", "LTC/USD", "PEPE/USD", "SHIB/USD", "SKY/USD", "SOL/USD", "SUSHI/USD", "UNI/USD", "XRP/USD", "XTZ/USD", "YFI/USD"]  # Available symbols
         
-        if len(sys.argv) > 2:
-            if sys.argv[2] == "stock":
-                asset_type = "stock"
-                symbols = ["AAPL", "MSFT", "GOOGL"]
-            else:
-                symbols = sys.argv[2].split(",")
-        
         try:
             if loop:
                 loop.run_until_complete(run_live_crypto_trading(symbols, asset_type))
@@ -436,11 +568,17 @@ if __name__ == "__main__":
                 loop.close()
     else:
         # Backtest mode (default)
+        # Check for reverse_time flag
+        reverse_time = "--reverse" in sys.argv or "-r" in sys.argv
+
+        if reverse_time:
+            logger.info("Running backtest in REVERSE time order (future → past) to test for trend-following")
+
         try:
             if loop:
-                loop.run_until_complete(run_standalone_backtest("crypto"))
+                loop.run_until_complete(run_standalone_backtest(reverse_time=reverse_time))
             else:
-                asyncio.run(run_standalone_backtest("crypto"))
+                asyncio.run(run_standalone_backtest(reverse_time=reverse_time))
         except KeyboardInterrupt:
             logger.info("Backtest process terminated by user.")
         finally:
