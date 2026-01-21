@@ -76,48 +76,60 @@ class CryptoAgent(BaseAgent):
         self.is_running = False
         logger.info("CryptoAgent stopped")
 
-    async def _on_bar(self, bar: 'Bar'):
-        """Handle incoming live bar data"""
-        symbol = bar.symbol
+    async def _on_bar(self, bar):
+        """Handle incoming live bar data (supports both Bar objects and dicts)"""
+        # Support both Alpaca Bar objects and dicts for performance
+        if hasattr(bar, 'symbol'):  # Alpaca Bar object (live trading)
+            symbol = bar.symbol
+            bar_data = {
+                'symbol': bar.symbol,
+                'timestamp': bar.timestamp,
+                'open': bar.open,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume,
+                'vwap': bar.vwap
+            }
+        else:  # Dict format (backtest - much faster!)
+            symbol = bar['symbol']
+            bar_data = bar
 
         # Log the incoming bar
-        vwap_display = f"${bar.vwap:.6f}" if bar.vwap and bar.vwap > 0 else "N/A"
+        vwap_display = f"${bar_data['vwap']:.6f}" if bar_data.get('vwap') and bar_data['vwap'] > 0 else "N/A"
         logger.debug(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar.close:.2f}, volume={bar.volume:.8f}, "
+            f"close=${bar_data['close']:.2f}, volume={bar_data['volume']:.8f}, "
             f"vwap={vwap_display}, "
-            f"time={bar.timestamp}"
+            f"time={bar_data['timestamp']}"
         )
 
-        # Convert bar to dataframe row
-        new_row = pd.DataFrame([{
-            'ts': bar.timestamp,
-            'open': bar.open,
-            'high': bar.high,
-            'low': bar.low,
-            'close': bar.close,
-            'volume': bar.volume,
-            'vwap': bar.vwap
-        }])
+        # Use efficient list-based buffering for backtest performance
+        # Avoid expensive DataFrame operations during bar ingestion
+        if symbol not in self.bar_data:
+            self.bar_data[symbol] = []
 
-        # Update bar buffer
-        if self.bar_data[symbol].empty:
-            self.bar_data[symbol] = new_row
-        else:
-            # More efficient: convert to dict list, append, recreate
-            data_list = self.bar_data[symbol].to_dict('records')
-            data_list.append(new_row.iloc[0].to_dict())
-            self.bar_data[symbol] = pd.DataFrame(data_list)
+        # Append bar data as dict (much faster than DataFrame operations)
+        bar_dict = {
+            'ts': bar_data['timestamp'],
+            'open': bar_data['open'],
+            'high': bar_data['high'],
+            'low': bar_data['low'],
+            'close': bar_data['close'],
+            'volume': bar_data['volume'],
+            'vwap': bar_data['vwap']
+        }
+        self.bar_data[symbol].append(bar_dict)
 
-        # Keep only recent data (sliding window)
+        # Keep only recent data (sliding window) - use efficient list slicing
         max_bars = self.window_size * 3
         if len(self.bar_data[symbol]) > max_bars:
-            self.bar_data[symbol] = self.bar_data[symbol].iloc[-max_bars:].reset_index(drop=True)
+            self.bar_data[symbol] = self.bar_data[symbol][-max_bars:]
 
         # Check if we have enough data to evaluate
         if len(self.bar_data[symbol]) >= self.window_size:
             logger.debug(f"EVALUATING strategy for {symbol}...")
-            self._evaluate_symbol(symbol)
+            await self._evaluate_symbol(symbol)
         else:
             logger.debug(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
 

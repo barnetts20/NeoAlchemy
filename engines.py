@@ -21,7 +21,36 @@ class BacktestEngine:
         self.window_size = agent.window_size
         self.results = {}
 
-    # Old per-symbol backtest method removed - using chunked approach instead
+    async def _load_chunk_data(self, repo: 'BacktestDataRepository', symbols: List[str], timeframe: str,
+                              start_date: datetime, end_date: datetime) -> Dict[str, pd.DataFrame]:
+        """Load data for all symbols in a single chunk efficiently."""
+        async with await get_conn() as conn:
+            table = repo.table_map["crypto"][timeframe]
+
+            # Single query for all symbols - much more efficient!
+            query = f"""
+                SELECT symbol, ts, open, high, low, close, volume, vwap
+                FROM {table}
+                WHERE symbol = ANY(%s) AND ts >= %s AND ts < %s
+                ORDER BY ts ASC, symbol ASC;
+            """
+            async with conn.cursor() as cur:
+                await cur.execute(query, (symbols, start_date, end_date))
+                rows = await cur.fetchall()
+
+                if not rows:
+                    return {}
+
+                # Convert to DataFrame
+                df = pd.DataFrame(rows, columns=['symbol', 'ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
+
+                # Split by symbol efficiently - use groupby instead of manual splitting
+                chunk_data = {}
+                for symbol, symbol_df in df.groupby('symbol'):
+                    symbol_df = symbol_df.set_index('ts').drop('symbol', axis=1)
+                    chunk_data[symbol] = symbol_df
+
+                return chunk_data
 
     async def run_backtest(self, repo: 'BacktestDataRepository', symbols: List[str], timeframe: str, chunk_days: int = 31, reverse_time: bool = False):
         """
@@ -55,20 +84,26 @@ class BacktestEngine:
 
             logger.info(f"Processing chunk: {current_date.date()} to {chunk_end.date()}")
 
-            # Load data for this chunk only
-            chunk_data = {}
-            active_symbols = []
+            # Load data for all symbols in this chunk efficiently (single query!)
+            try:
+                chunk_data = await self._load_chunk_data(repo, symbols, timeframe, current_date, chunk_end)
 
-            for symbol in symbols:
-                try:
-                    # Load only data for this date range
-                    df = await self._load_symbol_chunk(repo, symbol, timeframe, current_date, chunk_end)
-                    if df is not None and len(df) >= self.window_size:
-                        chunk_data[symbol] = df
-                        active_symbols.append(symbol)
-                        logger.debug(f"Loaded {len(df)} bars for {symbol} in chunk")
-                except Exception as e:
-                    logger.debug(f"Skipping {symbol} in chunk: {e}")
+                # Filter to symbols with sufficient data for strategy
+                active_symbols = [
+                    symbol for symbol, df in chunk_data.items()
+                    if df is not None and len(df) >= self.window_size
+                ]
+
+                if active_symbols:
+                    total_bars = sum(len(df) for df in chunk_data.values())
+                    logger.info(f"Loaded chunk data for {len(active_symbols)}/{len(symbols)} symbols ({total_bars} total bars)")
+                else:
+                    logger.debug("No symbols with sufficient data in this chunk")
+
+            except Exception as e:
+                logger.warning(f"Failed to load chunk data: {e}")
+                active_symbols = []
+                chunk_data = {}
 
             if not active_symbols:
                 logger.debug("No active symbols in this chunk, skipping")
@@ -86,7 +121,7 @@ class BacktestEngine:
     async def _load_symbol_chunk(self, repo: 'BacktestDataRepository', symbol: str, timeframe: str,
                                 start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Load data for a specific symbol and date range chunk."""
-        async with await get_conn() as conn:
+        async with await get_conn() as conn: # TODO: We can batch select the entire chunk instead of building it symbol by symbol, we dont care about the order of the bars only the timestamp anyway, so we can just 1) select the chunk out of the database already fully populated 1 call, 2) Map to bars
             table = repo.table_map["crypto"][timeframe]
             query = f"""
                 SELECT ts, open, high, low, close, volume, vwap
@@ -114,12 +149,12 @@ class BacktestEngine:
         for df in chunk_data.values():
             all_timestamps.update(df.index)
 
-        # Sort timestamps based on reverse_time flag
+        # Timestamps are already sorted by database query - just iterate in correct direction
         if reverse_time:
-            sorted_timestamps = sorted(all_timestamps, reverse=True)  # Future to past
-            logger.debug(f"Processing chunk in REVERSE time order: {len(sorted_timestamps)} timestamps")
+            sorted_timestamps = reversed(all_timestamps)  # Future to past (efficient!)
+            logger.debug(f"Processing chunk in REVERSE time order: {len(all_timestamps)} timestamps")
         else:
-            sorted_timestamps = sorted(all_timestamps)  # Past to future (normal)
+            sorted_timestamps = all_timestamps  # Past to future (normal)
 
         for timestamp in sorted_timestamps:
             # Find symbols that have data for this timestamp
@@ -161,13 +196,16 @@ class BacktestEngine:
                         change_pct = abs((current_bar['close'] - prev_bar['close']) / prev_bar['close'])
                         if change_pct > 5.0:  # 500% movement in one bar
                             logger.warning(
-                                f"Extreme price movement at {timestamp}: "
-                                f"{change_pct:.1%} from ${prev_bar['close']:.9f} to ${current_bar['close']:.9f}. "
-                                f"Skipping {symbol}."
+                                f"EXTREME PRICE MOVEMENT - SKIPPING {symbol} at {timestamp}: "
+                                f"Change: {change_pct:.1%} | "
+                                f"Prev: O:{prev_bar['open']:.6f} H:{prev_bar['high']:.6f} L:{prev_bar['low']:.6f} C:{prev_bar['close']:.6f} V:{prev_bar['volume']:.0f} | "
+                                f"Curr: O:{current_bar['open']:.6f} H:{current_bar['high']:.6f} L:{current_bar['low']:.6f} C:{current_bar['close']:.6f} V:{current_bar['volume']:.0f}"
                             )
                             continue
 
                 # Create synthetic Bar-like object (mimics Alpaca Bar interface)
+                # Using MockBar because Alpaca Bar constructor expects different parameters
+                # and we want to control VWAP handling explicitly
                 class MockBar:
                     def __init__(self, symbol, timestamp, open_, high, low, close, volume, vwap):
                         self.symbol = symbol
@@ -198,7 +236,7 @@ class BacktestEngine:
 
                 bars_at_time.append(synthetic_bar)
 
-            # Randomize bar order and feed to agent (EXACT same path as live trading)
+            # Randomize bar order and feed to agent (EXACT same path as live trading) We aready shuffled above before our for loop, we shouldnt need to shuffle again
             random.shuffle(bars_at_time)
 
             for bar in bars_at_time:
@@ -407,7 +445,7 @@ class BacktestDataRepository:
             return df
 
 
-async def run_standalone_backtest(reverse_time: bool = False):
+async def run_standalone_backtest(reverse_time: bool = False, timeframes = ["1M"]):
     """
     Runs a memory-efficient backtest against the database.
     Processes data in time chunks to minimize memory usage while maintaining
@@ -427,17 +465,19 @@ async def run_standalone_backtest(reverse_time: bool = False):
         symbols = await repo.get_active_symbols("crypto")
 
         # Only support 1M timeframe for now (crypto-focused)
-        timeframes = ["1M"]
         matrix_results = {}
 
         for tf in timeframes:
-            window = 31
+            if(tf == "1M"):
+                window = 10
             if(tf == "5M"):
-                window *= 5
+                window = 50
             elif(tf == "1H"):
-                window *= 60
+                window = 500 
             elif(tf == "1D"):
-                window *= 60 * 24
+                window = 5000
+            else:
+                logger.error("INVALID TIME FRAME");
 
             mode = "REVERSE TIME" if reverse_time else "FORWARD TIME"
             logger.info(f"Starting {mode} backtest for {len(symbols)} crypto symbols on {tf}")
@@ -455,7 +495,7 @@ async def run_standalone_backtest(reverse_time: bool = False):
             engine = BacktestEngine(broker, agent)
 
             try:
-                # Run memory-efficient real-time simulation (7-day chunks)
+                # Run memory-efficient real-time simulation
                 await engine.run_backtest(repo, symbols, tf, window, reverse_time=reverse_time)
 
                 # Process results for each symbol
