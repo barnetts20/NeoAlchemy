@@ -15,6 +15,97 @@ from logger import LogHelper, logger
 import random
 from datetime import datetime, timedelta
 
+class BacktestDataRepository:
+    def __init__(self, conn: AsyncConnection):
+        self.conn = conn
+        # Reusing your table mapping logic
+        self.table_map = {
+            "stock": {"1D": "stock_candles_1d", "1H": "stock_candles_1h", "1M": "stock_candles_1m", "5M": "stock_candles_5m"},
+            "crypto": {"1D": "crypto_candles_1d", "1H": "crypto_candles_1h", "1M": "crypto_candles_1m", "5M": "crypto_candles_5m"}
+        }
+
+    async def get_active_symbols(self, asset_type: str) -> List[str]:
+        async with self.conn.cursor() as cur:
+            await cur.execute("SELECT symbol FROM assets WHERE asset_type=%s AND active=TRUE;", (asset_type,))
+            rows = await cur.fetchall()
+            return [row[0] for row in rows]
+        
+    @staticmethod
+    def _map_row_to_bar(row: tuple) -> Bar:
+        """
+        Convert database row to Alpaca Bar object
+        
+        Args:
+            row: Database row tuple (symbol, ts, open, high, low, close, volume, vwap, trade_count)
+        
+        Returns:
+            Bar: Alpaca-compatible Bar object
+        """
+
+        symbol, ts, open_price, high, low, close, volume, trade_count, vwap = row
+        raw_data = {
+            't': ts,                                        # timestamp
+            'o': float(open_price),                         # open
+            'h': float(high),                               # high
+            'l': float(low),                                # low
+            'c': float(close),                              # close
+            'v': float(volume),                             # volume
+            'vw': float(vwap) if vwap else None,            # vwap
+            'n': int(trade_count) if trade_count else None,  # trade_count
+        }
+        # Create Alpaca Bar object directly from database row
+        return Bar(symbol=symbol, raw_data=raw_data)
+
+    async def load_chunk_data(self, symbols, timeframe, start_date, end_date, reverse_time=False):
+        """Load data for all symbols in a chunk and return {timestamp: [Bar objects]}."""
+        table = self.table_map["crypto"][timeframe]
+
+        # Order by timestamp based on reverse_time flag
+        order_direction = "DESC" if reverse_time else "ASC"
+
+        query = f"""
+            SELECT symbol, ts, open, high, low, close, volume, trade_count, vwap
+            FROM {table}
+            WHERE symbol = ANY(%s) AND ts >= %s AND ts < %s
+            ORDER BY ts {order_direction};
+        """
+        async with self.conn.cursor() as cur:
+            await cur.execute(query, (symbols, start_date, end_date))
+            rows = await cur.fetchall()
+
+        if not rows:
+            return {}
+
+        # Group bars by timestamp, creating Alpaca Bar objects
+        bars_by_timestamp = {}
+        for row in rows:
+            # Create Alpaca Bar object directly from database row
+            bar = self._map_row_to_bar(row)
+            ts = bar.timestamp
+            # Group bars by timestamp
+            if ts not in bars_by_timestamp:
+                bars_by_timestamp[ts] = []
+            bars_by_timestamp[ts].append(bar)
+
+        return bars_by_timestamp
+
+    async def fetch_history(self, asset_type: str, symbol: str, timeframe: str) -> pd.DataFrame:
+        table = self.table_map[asset_type][timeframe]
+
+        query = f"""
+            SELECT *
+            FROM {table}
+            WHERE symbol = %s
+            ORDER BY ts ASC;
+        """
+        async with self.conn.cursor() as cur:
+            await cur.execute(query, (symbol,))
+            rows = await cur.fetchall()
+
+            df = pd.DataFrame(rows, columns=['symbol', 'ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
+            df.set_index('ts', inplace=True)
+            return df
+
 class BacktestEngine:
     def __init__(self, broker, agent: BaseAgent):
         self.broker = broker  # The LocalSimBroker instance
@@ -219,176 +310,6 @@ class LiveCryptoEngine:
     
     # All bar processing is now handled directly by the agent
     
-async def shutdown(self):
-    """Gracefully shutdown the engine"""
-    logger.info("Shutting down live engine...")
-    self.is_running = False
-    
-    # Close stream connections
-    try:
-        await self.stream.stop_ws()
-        logger.info("Stream stopped")
-    except Exception as e:
-        logger.error(f"Error stopping stream: {e}")
-    
-    # Give tasks time to cleanup
-    await asyncio.sleep(0.5)
-    
-    # Cancel any remaining tasks
-    try:
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-        
-        # Wait for tasks to complete cancellation
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.debug(f"Task cleanup: {e}")
-    
-    # Log final positions and account state
-    try:
-        account = self.broker.get_account()
-        positions = self.broker.get_all_positions()
-        
-        logger.info("=" * 60)
-        logger.info("FINAL ACCOUNT STATE")
-        logger.info("=" * 60)
-        logger.info(f"Equity: ${float(account.get('equity', 0)):,.2f}")
-        logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
-        logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
-        logger.info(f"Open Positions: {len(positions)}")
-
-        if positions:
-            logger.info("\nPositions:")
-            for pos in positions:
-                logger.info(
-                    f"  {pos['symbol']}: {pos['qty']} @ "
-                    f"${float(pos['current_price']):.2f} "
-                    f"(P&L: ${float(pos['unrealized_pl']):.2f})"
-                )
-        
-        logger.info("=" * 60)
-
-        self.broker.close_all_positions(True)
-        
-    except Exception as e:
-        logger.error(f"Error getting final state: {e}")
-
-    logger.info("Shutdown complete")
-
-class BacktestDataRepository:
-    def __init__(self, conn: AsyncConnection):
-        self.conn = conn
-        # Reusing your table mapping logic
-        self.table_map = {
-            "stock": {"1D": "stock_candles_1d", "1H": "stock_candles_1h", "1M": "stock_candles_1m", "5M": "stock_candles_5m"},
-            "crypto": {"1D": "crypto_candles_1d", "1H": "crypto_candles_1h", "1M": "crypto_candles_1m", "5M": "crypto_candles_5m"}
-        }
-
-    async def get_active_symbols(self, asset_type: str) -> List[str]:
-        async with self.conn.cursor() as cur:
-            await cur.execute("SELECT symbol FROM assets WHERE asset_type=%s AND active=TRUE;", (asset_type,))
-            rows = await cur.fetchall()
-            return [row[0] for row in rows]
-        
-    @staticmethod
-    def _map_row_to_bar(row: tuple) -> Bar:
-        """
-        Convert database row to Alpaca Bar object
-        
-        Args:
-            row: Database row tuple (symbol, ts, open, high, low, close, volume, vwap, trade_count)
-        
-        Returns:
-            Bar: Alpaca-compatible Bar object
-        """
-
-        symbol, ts, open_price, high, low, close, volume, trade_count, vwap = row
-        raw_data = {
-            't': ts,                                        # timestamp
-            'o': float(open_price),                         # open
-            'h': float(high),                               # high
-            'l': float(low),                                # low
-            'c': float(close),                              # close
-            'v': float(volume),                             # volume
-            'vw': float(vwap) if vwap else None,            # vwap
-            'n': int(trade_count) if trade_count else None,  # trade_count
-        }
-        # Create Alpaca Bar object directly from database row
-        return Bar(symbol=symbol, raw_data=raw_data)
-
-    async def load_chunk_data(self, symbols, timeframe, start_date, end_date, reverse_time=False):
-        """Load data for all symbols in a chunk and return {timestamp: [Bar objects]}."""
-        table = self.table_map["crypto"][timeframe]
-
-        # Order by timestamp based on reverse_time flag
-        order_direction = "DESC" if reverse_time else "ASC"
-
-        query = f"""
-            SELECT symbol, ts, open, high, low, close, volume, trade_count, vwap
-            FROM {table}
-            WHERE symbol = ANY(%s) AND ts >= %s AND ts < %s
-            ORDER BY ts {order_direction};
-        """
-        async with self.conn.cursor() as cur:
-            await cur.execute(query, (symbols, start_date, end_date))
-            rows = await cur.fetchall()
-
-        if not rows:
-            return {}
-
-        # Group bars by timestamp, creating Alpaca Bar objects
-        bars_by_timestamp = {}
-        for row in rows:
-            # Create Alpaca Bar object directly from database row
-            bar = self._map_row_to_bar(row)
-            ts = bar.timestamp
-            # Group bars by timestamp
-            if ts not in bars_by_timestamp:
-                bars_by_timestamp[ts] = []
-            bars_by_timestamp[ts].append(bar)
-
-        return bars_by_timestamp
-
-    async def load_symbol_chunk(self, symbol: str, timeframe: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-        """Load data for a specific symbol and date range chunk."""
-        table = self.table_map["crypto"][timeframe]
-        query = f"""
-            SELECT symbol, ts, open, high, low, close, volume, trade_count, vwap
-            FROM {table}
-            WHERE symbol = %s AND ts >= %s AND ts < %s
-            ORDER BY ts ASC;
-        """
-        async with self.conn.cursor() as cur:
-            await cur.execute(query, (symbol, start_date, end_date))
-            rows = await cur.fetchall()
-
-            if not rows:
-                return None
-
-            df = pd.DataFrame(rows, columns=['symbol', 'ts', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap'])
-            df.set_index('ts', inplace=True)
-            return df
-
-    async def fetch_history(self, asset_type: str, symbol: str, timeframe: str) -> pd.DataFrame:
-        table = self.table_map[asset_type][timeframe]
-
-        query = f"""
-            SELECT *
-            FROM {table}
-            WHERE symbol = %s
-            ORDER BY ts ASC;
-        """
-        async with self.conn.cursor() as cur:
-            await cur.execute(query, (symbol,))
-            rows = await cur.fetchall()
-
-            df = pd.DataFrame(rows, columns=['symbol', 'ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
-            df.set_index('ts', inplace=True)
-            return df
-
-
 async def run_standalone_backtest(reverse_time: bool = False, timeframes = ["1M"]):
     """
     Runs a memory-efficient backtest against the database.
@@ -485,6 +406,63 @@ async def run_live_crypto_trading(symbols: List[str], asset_type: str = "crypto"
     # Start the engine
     await engine.start()
 
+async def shutdown(self):
+    """Gracefully shutdown the engine"""
+    logger.info("Shutting down live engine...")
+    self.is_running = False
+    
+    # Close stream connections
+    try:
+        await self.stream.stop_ws()
+        logger.info("Stream stopped")
+    except Exception as e:
+        logger.error(f"Error stopping stream: {e}")
+    
+    # Give tasks time to cleanup
+    await asyncio.sleep(0.5)
+    
+    # Cancel any remaining tasks
+    try:
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        
+        # Wait for tasks to complete cancellation
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logger.debug(f"Task cleanup: {e}")
+    
+    # Log final positions and account state
+    try:
+        account = self.broker.get_account()
+        positions = self.broker.get_all_positions()
+        
+        logger.info("=" * 60)
+        logger.info("FINAL ACCOUNT STATE")
+        logger.info("=" * 60)
+        logger.info(f"Equity: ${float(account.get('equity', 0)):,.2f}")
+        logger.info(f"Cash: ${float(account.get('cash', 0)):,.2f}")
+        logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
+        logger.info(f"Open Positions: {len(positions)}")
+
+        if positions:
+            logger.info("\nPositions:")
+            for pos in positions:
+                logger.info(
+                    f"  {pos['symbol']}: {pos['qty']} @ "
+                    f"${float(pos['current_price']):.2f} "
+                    f"(P&L: ${float(pos['unrealized_pl']):.2f})"
+                )
+        
+        logger.info("=" * 60)
+
+        self.broker.close_all_positions(True)
+        
+    except Exception as e:
+        logger.error(f"Error getting final state: {e}")
+
+    logger.info("Shutdown complete")
 
 if __name__ == "__main__":
     # Standard cross-platform loop handling for Windows
