@@ -12,7 +12,8 @@ from db_connection import get_conn
 from strategies import VWAPReversionStrategy
 from psycopg import AsyncConnection
 from logger import LogHelper, logger
-
+import random
+from datetime import datetime, timedelta
 
 class BacktestEngine:
     def __init__(self, broker, agent: BaseAgent):
@@ -21,153 +22,111 @@ class BacktestEngine:
         self.window_size = agent.window_size
         self.results = {}
 
-    async def run_backtest(self, repo: 'BacktestDataRepository', symbols: List[str], timeframe: str = "1M", chunk_days: int = 31, reverse_time: bool = False):
+    async def run_backtest(self, repo: 'BacktestDataRepository', symbols: List[str], start_date: datetime, end_date: datetime, timeframe: str = "1M", chunk_days: int = 31, reverse_time: bool = False):
         """
-        Runs memory-efficient backtest by processing data in time chunks.
-        More closely mirrors live trading behavior with randomized symbol processing.
+        Runs simplified backtest by processing data in time-sliced chunks.
+        Mirrors live trading by feeding timestamp-organized bars to agent.
 
         Args:
             repo: BacktestDataRepository instance for data access
             symbols: List of symbols to backtest
             timeframe: Timeframe string (e.g., "1M")
             chunk_days: Number of days to process at once (memory management)
-            reverse_time: If True, process timestamps in reverse chronological order
-                         (future to past) to test for trend-following vs predictive strategies
+            reverse_time: If True, process chunks in reverse chronological order
         """
-        import random
-        from datetime import datetime, timedelta
-        
-        start_date = datetime(2024, 1, 1) # TODO: Should be passed in
-        end_date = datetime.now() # TODO: Should be passed in with a default
 
-        current_date = start_date
         chunk_size = timedelta(days=chunk_days)
 
         # Initialize results tracking
         self.results = {}
 
-        while current_date < end_date:
-            chunk_end = min(current_date + chunk_size, end_date)
+        # Step 1: Construct time window and determine sampling order
+        if reverse_time:
+            # Start from end, increment backwards
+            current_date = end_date
+            step_direction = -chunk_size
+            logger.info("Running backtest in REVERSE time order")
+        else:
+            # Start from beginning, increment forwards
+            current_date = start_date
+            step_direction = chunk_size
+            logger.info("Running backtest in FORWARD time order")
 
-            logger.info(f"Processing chunk: {current_date.date()} to {chunk_end.date()}")
+        chunk_num = 0
+        while (not reverse_time and current_date < end_date) or (reverse_time and current_date > start_date):
+            # Calculate chunk boundaries
+            if reverse_time:
+                chunk_start = max(current_date - chunk_size, start_date)
+                chunk_end = current_date
+            else:
+                chunk_start = current_date
+                chunk_end = min(current_date + chunk_size, end_date)
 
-            # Load data for all symbols in this chunk efficiently (single query!)
+            chunk_num += 1
+            logger.info(f"Processing chunk {chunk_num}: {chunk_start.date()} to {chunk_end.date()}")
+
+            # Step 2: Load chunk data as {timestamp: [Bar objects]}
             try:
-                chunk_df = await repo.load_chunk_data(symbols, timeframe, current_date, chunk_end)
+                bars_by_timestamp = await repo.load_chunk_data(symbols, timeframe, chunk_start, chunk_end, reverse_time)
 
-                if chunk_df.empty:
+                if not bars_by_timestamp:
                     logger.debug("No data in this chunk")
                 else:
-                    logger.info(f"Loaded chunk data ({len(chunk_df)} total bars)")
-                # Process this chunk timestamp by timestamp 
-                await self._process_chunk_timestamps(chunk_df, reverse_time)
+                    total_bars = sum(len(bars) for bars in bars_by_timestamp.values())
+                    logger.info(f"Loaded chunk data ({total_bars} total bars across {len(bars_by_timestamp)} timestamps)")
+
+                # Step 3: Process the chunk
+                await self._process_chunk(bars_by_timestamp)
+
             except Exception as e:
                 logger.warning(f"Failed to load chunk data: {e}")
 
-            current_date = chunk_end
+            # Move to next chunk
+            current_date += step_direction
 
-        logger.info("Real-time backtest completed")
+        logger.info("Backtest completed")
         return self.results
 
     # Database loading moved to BacktestDataRepository for proper separation of concerns
 
-    async def _process_chunk_timestamps(self, chunk_df: pd.DataFrame, reverse_time: bool = False):
-        """Process all timestamps in a data chunk."""
+    async def _process_chunk(self, bars_by_timestamp: Dict[datetime, List]):
+        """Process a chunk by iterating through ordered timestamps and feeding randomized bars."""
         import random
 
-        if chunk_df.empty:
+        if not bars_by_timestamp:
             return
 
-        # Get all unique timestamps from MultiIndex (already sorted by database!)
-        all_timestamps = chunk_df.index.get_level_values('ts').unique()
+        # The dict keys are already in the correct order (sorted by database query)
+        # Just iterate through them sequentially
+        logger.debug(f"Processing chunk with {len(bars_by_timestamp)} timestamps")
 
-        # Apply reverse time if requested
-        if reverse_time:
-            all_timestamps = all_timestamps[::-1]  # Reverse the numpy array
-            logger.debug(f"Processing chunk in REVERSE time order: {len(all_timestamps)} timestamps")
-        else:
-            logger.debug(f"Processing chunk in FORWARD time order: {len(all_timestamps)} timestamps")
-
-        for timestamp in all_timestamps:
-            # Get ALL bars for this timestamp using MultiIndex - ultra fast!
-            try:
-                timestamp_bars = chunk_df.xs(timestamp, level='ts', drop_level=False) #TODO: it might be faster when fetching the chunk to go ahead and sort/map it into a timestamp key - Bar array value map, then
-            except KeyError:
-                continue
-
-            if timestamp_bars.empty:
-                continue
-
-            # Get symbols available at this timestamp (from MultiIndex)
-            symbols_at_time = timestamp_bars.index.get_level_values('symbol').unique().tolist()
-
-            if not symbols_at_time:
+        for timestamp, bars_at_time in bars_by_timestamp.items():
+            if not bars_at_time:
                 continue
 
             # Randomize order to simulate real-time bar arrival
-            random.shuffle(symbols_at_time)
+            random.shuffle(bars_at_time)
 
-            logger.debug(f"Processing {len(symbols_at_time)} symbols at {timestamp}")
+            logger.debug(f"Processing {len(bars_at_time)} bars at {timestamp}")
 
-            # Process each symbol at this timestamp
-            for symbol in symbols_at_time:
-                # Get this symbol's bar data using MultiIndex - instant lookup!
+            # Feed each bar to agent's _on_bar method (same as live trading!)
+            for bar in bars_at_time:
                 try:
-                    bar_row = timestamp_bars.loc[(symbol, timestamp)]
-                    # TODO: ROBUST DATA VALIDATION
-                    # VALIDATE PRICE DATA
-                    # if bar_row['close'] <= 0:
-                    #    logger.debug(f"Invalid price at {timestamp}: {bar_row['close']}. Skipping {symbol}.")
-                    #    continue
-
-                    # Check for unrealistic price jumps from the chunk data
-                    # symbol_history = chunk_df[(chunk_df['symbol'] == symbol) & (chunk_df['ts'] < timestamp)]
-                    # if not symbol_history.empty:
-                    #    prev_bar = symbol_history.iloc[-1]  # Most recent previous bar in chunk
-                    #    if prev_bar['close'] > 0:
-                    #        change_pct = abs((bar_row['close'] - prev_bar['close']) / prev_bar['close'])
-                    #        if change_pct > 5.0:  # 500% movement in one bar
-                    #            logger.debug(f"Extreme price movement at {timestamp}: {change_pct:.1%}. Skipping {symbol}.")
-                    #            continue
-                    # Handle VWAP properly - use close price only if VWAP is missing/NaN
-                    vwap_value = bar_row.get('vwap')
-                    if vwap_value is None or pd.isna(vwap_value):
-                        vwap_value = bar_row['close']  # Use close price as fallback for missing data
-
-                    # Create lightweight bar dict - much faster than objects!
-                    bar_data = {
-                        'symbol': symbol,
-                        'timestamp': timestamp,
-                        'open': bar_row['open'],
-                        'high': bar_row['high'],
-                        'low': bar_row['low'],
-                        'close': bar_row['close'],
-                        'volume': bar_row['volume'],
-                        'trade_count': bar_row['trade_count'],
-                        'vwap': vwap_value
-                    }
-
-                    logger.debug(f"BACKTEST BAR - {symbol}: close=${bar_data['close']:.9f}, time={timestamp}")
-
-                    # Call agent's optimized _on_bar method with dict
-                    try:
-                        await self.agent._on_bar(bar_data)
-                    except Exception as e:
-                        logger.error(f"Error processing bar for {symbol}: {e}")
-                        continue                        
-                except KeyError:
+                    await self.agent._on_bar(bar)
+                except Exception as e:
+                    logger.error(f"Error processing bar for {bar.symbol}: {e}")
                     continue
 
                 # Record results after each bar (for P&L tracking)
                 acc = self.broker.get_account()
-                if symbol not in self.results:
-                    self.results[symbol] = []
+                if bar.symbol not in self.results:
+                    self.results[bar.symbol] = []
 
-                self.results[symbol].append({
+                self.results[bar.symbol].append({
                     "timestamp": timestamp,
                     "cash": float(acc["cash"]),
                     "equity": float(acc["equity"]),
-                    "price": bar_row['close']
+                    "price": bar.close
                 })
 
 class LiveCryptoEngine:
@@ -332,30 +291,65 @@ class BacktestDataRepository:
             await cur.execute("SELECT symbol FROM assets WHERE asset_type=%s AND active=TRUE;", (asset_type,))
             rows = await cur.fetchall()
             return [row[0] for row in rows]
+        
+    @staticmethod
+    def _map_row_to_bar(row: tuple) -> Bar:
+        """
+        Convert database row to Alpaca Bar object
+        
+        Args:
+            row: Database row tuple (symbol, ts, open, high, low, close, volume, vwap, trade_count)
+        
+        Returns:
+            Bar: Alpaca-compatible Bar object
+        """
 
-    async def load_chunk_data(self, symbols, timeframe, start_date, end_date):
-        """Load data for all symbols in a single chunk efficiently."""
+        symbol, ts, open_price, high, low, close, volume, trade_count, vwap = row
+        raw_data = {
+            't': ts,                                        # timestamp
+            'o': float(open_price),                         # open
+            'h': float(high),                               # high
+            'l': float(low),                                # low
+            'c': float(close),                              # close
+            'v': float(volume),                             # volume
+            'vw': float(vwap) if vwap else None,            # vwap
+            'n': int(trade_count) if trade_count else None,  # trade_count
+        }
+        # Create Alpaca Bar object directly from database row
+        return Bar(symbol=symbol, raw_data=raw_data)
+
+    async def load_chunk_data(self, symbols, timeframe, start_date, end_date, reverse_time=False):
+        """Load data for all symbols in a chunk and return {timestamp: [Bar objects]}."""
         table = self.table_map["crypto"][timeframe]
 
-        # Single query for all symbols - get ALL bars ordered by timestamp only!
-        # TODO: HANDLING FOR REVERSE TIME ORDER
+        # Order by timestamp based on reverse_time flag
+        order_direction = "DESC" if reverse_time else "ASC"
+
         query = f"""
             SELECT symbol, ts, open, high, low, close, volume, trade_count, vwap
             FROM {table}
             WHERE symbol = ANY(%s) AND ts >= %s AND ts < %s
-            ORDER BY ts ASC;
+            ORDER BY ts {order_direction};
         """
         async with self.conn.cursor() as cur:
             await cur.execute(query, (symbols, start_date, end_date))
             rows = await cur.fetchall()
 
         if not rows:
-            return pd.DataFrame()
+            return {}
 
-        # Convert to DataFrame with MultiIndex (symbol, ts) for efficient lookups
-        df = pd.DataFrame(rows, columns=['symbol', 'ts', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap'])
-        df.set_index(['symbol', 'ts'], inplace=True)
-        return df
+        # Group bars by timestamp, creating Alpaca Bar objects
+        bars_by_timestamp = {}
+        for row in rows:
+            # Create Alpaca Bar object directly from database row
+            bar = self._map_row_to_bar(row)
+            ts = bar.timestamp
+            # Group bars by timestamp
+            if ts not in bars_by_timestamp:
+                bars_by_timestamp[ts] = []
+            bars_by_timestamp[ts].append(bar)
+
+        return bars_by_timestamp
 
     async def load_symbol_chunk(self, symbol: str, timeframe: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Load data for a specific symbol and date range chunk."""
@@ -446,7 +440,10 @@ async def run_standalone_backtest(reverse_time: bool = False, timeframes = ["1M"
 
             try:
                 # Run memory-efficient real-time simulation
-                await engine.run_backtest(repo, symbols, tf, chunk_days, reverse_time=reverse_time)
+
+                start_date = datetime(2024, 1, 1) # TODO: Should be passed in
+                end_date = datetime.now() # TODO: Should be passed in with a default
+                await engine.run_backtest(repo, symbols, start_date, end_date, tf, chunk_days, reverse_time=reverse_time)
 
                 # Log signal summary
                 hold_count = strategy.signals_generated - strategy.buy_signals - strategy.sell_signals

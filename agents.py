@@ -76,47 +76,31 @@ class CryptoAgent(BaseAgent):
         logger.info("CryptoAgent stopped")
 
     async def _on_bar(self, bar):
-        """Handle incoming live bar data (supports both Bar objects and dicts)"""
-        # Support both Alpaca Bar objects and dicts for performance
-        if hasattr(bar, 'symbol'):  # Alpaca Bar object (live trading)
-            symbol = bar.symbol
-            bar_data = {
-                'symbol': bar.symbol,
-                'timestamp': bar.timestamp,
-                'open': bar.open,
-                'high': bar.high,
-                'low': bar.low,
-                'close': bar.close,
-                'volume': bar.volume,
-                'vwap': bar.vwap
-            }
-        else:  # Dict format (backtest - much faster!)
-            symbol = bar['symbol']
-            bar_data = bar
+        """Handle incoming bar data (Alpaca Bar objects for both live and backtest)."""
+        symbol = bar.symbol
 
         # Log the incoming bar
-        vwap_display = f"${bar_data['vwap']:.6f}" if bar_data.get('vwap') and bar_data['vwap'] > 0 else "N/A"
+        vwap_display = f"${bar.vwap:.6f}" if bar.vwap and bar.vwap > 0 else "N/A"
         logger.debug(
             f"BAR RECEIVED - {symbol}: "
-            f"close=${bar_data['close']:.2f}, volume={bar_data['volume']:.8f}, "
+            f"close=${bar.close:.2f}, volume={bar.volume:.8f}, "
             f"vwap={vwap_display}, "
-            f"time={bar_data['timestamp']}"
+            f"time={bar.timestamp}"
         )
 
         # Use efficient list-based buffering for backtest performance
-        # Avoid expensive DataFrame operations during bar ingestion
         if symbol not in self.bar_data:
             self.bar_data[symbol] = []
 
-        # Append bar data as dict (much faster than DataFrame operations)
+        # Append bar data as dict for internal processing
         bar_dict = {
-            'ts': bar_data['timestamp'],
-            'open': bar_data['open'],
-            'high': bar_data['high'],
-            'low': bar_data['low'],
-            'close': bar_data['close'],
-            'volume': bar_data['volume'],
-            'vwap': bar_data['vwap']
+            'ts': bar.timestamp,
+            'open': bar.open,
+            'high': bar.high,
+            'low': bar.low,
+            'close': bar.close,
+            'volume': bar.volume,
+            'vwap': bar.vwap
         }
         self.bar_data[symbol].append(bar_dict)
 
