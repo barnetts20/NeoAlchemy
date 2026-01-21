@@ -44,9 +44,8 @@ class CryptoAgent(BaseAgent):
     def set_symbols(self, symbols: List[str]):
         """Set the symbols this agent should trade"""
         self.symbols = symbols
-        # Initialize bar data buffer for each symbol
-        self.bar_data = {symbol: pd.DataFrame(columns=['ts', 'open', 'high', 'low', 'close', 'volume', 'vwap'])
-                        for symbol in symbols}
+        # Initialize bar data buffer for each symbol (use lists for efficiency)
+        self.bar_data = {symbol: [] for symbol in symbols}
 
     def set_stream(self, stream):
         """Set the data stream for live trading"""
@@ -129,7 +128,10 @@ class CryptoAgent(BaseAgent):
         # Check if we have enough data to evaluate
         if len(self.bar_data[symbol]) >= self.window_size:
             logger.debug(f"EVALUATING strategy for {symbol}...")
-            await self._evaluate_symbol(symbol)
+            try:
+                self._evaluate_symbol(symbol)
+            except Exception as e:
+                logger.error(f"ERROR evaluating {symbol}: {e}")
         else:
             logger.debug(f"WAITING for more data for {symbol}: {len(self.bar_data[symbol])}/{self.window_size}")
 
@@ -141,8 +143,10 @@ class CryptoAgent(BaseAgent):
                 # Backtest mode - use provided window
                 data = bar_window
             else:
-                # Live mode - construct window from buffer
-                data = self.bar_data[symbol].set_index('ts')
+                # Live mode - construct window from buffer (convert list to DataFrame)
+                if not self.bar_data[symbol]:
+                    return
+                data = pd.DataFrame(self.bar_data[symbol]).set_index('ts')
 
             if len(data) < self.window_size:
                 logger.warning(f"Not enough data for {symbol}: {len(data)}/{self.window_size}")

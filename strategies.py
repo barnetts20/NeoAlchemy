@@ -53,9 +53,9 @@ class VWAPReversionStrategy(BaseStrategy):
     
     def __init__(self, parameters=None):
         params = parameters or {}
-        super().__init__(1, params)
+        super().__init__(31, params)
         self.lookback = self.window_size
-        self.open_long_threshold = parameters.get('open_long_threshold', -0.015)
+        self.open_long_threshold = parameters.get('open_long_threshold', -0.005)
         self.close_long_threshold = parameters.get('close_long_threshold', 0.001)
         self.signals_generated = 0
         self.buy_signals = 0

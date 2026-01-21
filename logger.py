@@ -76,11 +76,11 @@ class LogHelper:
 
 # Create logger instance
 logger = logging.getLogger('alchemy')
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 # Console handler
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 
 # Formatter
 formatter = logging.Formatter(
