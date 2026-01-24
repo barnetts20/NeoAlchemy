@@ -171,7 +171,7 @@ class LocalSimBroker:
         self.current_prices = {}  # The "Tape": { symbol: price }
         
         # Fee Constants (Alpaca / Regulatory Defaults)
-        self.CRYPTO_FEE_RATE = 0.006  # 0.6% Taker Fee (more realistic)
+        self.CRYPTO_FEE_RATE = 0.003  # 0.6% Taker Fee (more realistic)
         self.SEC_FEE_RATE = 8.00 / 1_000_000  # $8 per million (Sells only)
         self.TAF_RATE = 0.000166  # Per share (Sells only)
         self.TAF_MAX = 8.30

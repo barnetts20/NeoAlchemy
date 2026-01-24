@@ -38,7 +38,7 @@ except json.JSONDecodeError as e:
 
 # Determine which account to use
 isPaper = SETTINGS["paper"]
-
+symbols_crypto = SETTINGS["symbols-crypto"]
 account_key = "alpaca_paper" if isPaper else "alpaca"
 api_key = SECRETS[account_key]["api_key"]
 secret_key = SECRETS[account_key]["secret_key"]

@@ -9,7 +9,8 @@ from alpaca.data.models import Bar
 from agents import BaseAgent, CryptoAgent
 from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
-from strategies import VWAPReversionStrategy
+from project_context import SETTINGS
+from strategies import VWAPReversionStrategy, MACDStrategy, MACDHistogramStrategy
 from psycopg import AsyncConnection
 from logger import LogHelper, logger
 import random
@@ -327,8 +328,8 @@ async def run_standalone_backtest(reverse_time: bool = False, timeframes = ["1M"
     """
     async with await get_conn() as conn:
         repo = BacktestDataRepository(conn)
-        symbols = await repo.get_active_symbols("crypto")
-
+        # symbols = await repo.get_active_symbols("crypto")
+        symbols = ["BTC/USD"]
         # Only support 1M timeframe for now (crypto-focused)
         matrix_results = {}
 
@@ -350,6 +351,7 @@ async def run_standalone_backtest(reverse_time: bool = False, timeframes = ["1M"
             # Fresh broker and agent for this timeframe (shared across all symbols)
             broker = LocalSimBroker(initial_cash=10000.0)
             strategy = VWAPReversionStrategy(parameters={})
+            # strategy = MACDStrategy(parameters={})
             agent = CryptoAgent(strategy)
 
             # Configure agent for backtest mode (no stream)
@@ -477,8 +479,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "live":
         # Live trading mode
         asset_type = "crypto"  # Default to crypto
-        symbols = ["AAVE/USD", "AVAX/USD", "BAT/USD", "BCH/USD", "BTC/USD", "CRV/USD", "DOGE/USD", "DOT/USD", "ETH/USD", "GRT/USD", "LINK/USD", "LTC/USD", "PEPE/USD", "SHIB/USD", "SKY/USD", "SOL/USD", "SUSHI/USD", "UNI/USD", "XRP/USD", "XTZ/USD", "YFI/USD"]  # Available symbols
-        
+        symbols = SETTINGS.symbols_crypto
         try:
             if loop:
                 loop.run_until_complete(run_live_crypto_trading(symbols, asset_type))

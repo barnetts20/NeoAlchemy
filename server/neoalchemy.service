@@ -1,0 +1,42 @@
+# /etc/systemd/system/neoalchemy.service
+# Systemd service for NeoAlchemy trading bot
+# 
+# Installation:
+#   sudo cp neoalchemy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable neoalchemy
+#   sudo systemctl start neoalchemy
+#
+# Management:
+#   sudo systemctl status neoalchemy
+#   sudo systemctl stop neoalchemy
+#   sudo systemctl restart neoalchemy
+#   sudo journalctl -u neoalchemy -f  # View logs
+
+[Unit]
+Description=NeoAlchemy Trading Bot
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/NeoAlchemy
+Environment="PATH=/root/NeoAlchemy/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Run the live trading engine
+ExecStart=/root/NeoAlchemy/venv/bin/python /root/NeoAlchemy/engines.py live
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=append:/root/NeoAlchemy/logs/bot.log
+StandardError=append:/root/NeoAlchemy/logs/bot-error.log
+
+# Security (optional hardening)
+# PrivateTmp=yes
+# NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
