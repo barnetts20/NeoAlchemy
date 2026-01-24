@@ -1,6 +1,6 @@
 {
-  "symbols-crypto": ["AAVE/USD", "AVAX/USD", "BAT/USD", "BCH/USD", "BTC/USD", "CRV/USD", "DOGE/USD", "DOT/USD", "ETH/USD", "GRT/USD", "LINK/USD", "LTC/USD", "PEPE/USD", "SHIB/USD", "SKY/USD", "SOL/USD", "SUSHI/USD", "UNI/USD", "XRP/USD", "XTZ/USD", "YFI/USD"],
-  "symbols-stock": ["AAPL", "MSFT", "NVDA"],
+  "symbols_crypto": ["AAVE/USD", "AVAX/USD", "BAT/USD", "BCH/USD", "BTC/USD", "CRV/USD", "DOGE/USD", "DOT/USD", "ETH/USD", "GRT/USD", "LINK/USD", "LTC/USD", "PEPE/USD", "SHIB/USD", "SKY/USD", "SOL/USD", "SUSHI/USD", "UNI/USD", "XRP/USD", "XTZ/USD", "YFI/USD"],
+  "symbols_stock": ["AAPL", "MSFT", "NVDA"],
   "strategy": "simple_ma",
   "interval": "1h",
   "paper": true,

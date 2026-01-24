@@ -9,7 +9,7 @@ from alpaca.data.models import Bar
 from agents import BaseAgent, CryptoAgent
 from brokers import LocalSimBroker, LiveAlpacaBroker
 from db_connection import get_conn
-from project_context import SETTINGS
+from project_context import SETTINGS, symbols_crypto
 from strategies import VWAPReversionStrategy, MACDStrategy, MACDHistogramStrategy
 from psycopg import AsyncConnection
 from logger import LogHelper, logger
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "live":
         # Live trading mode
         asset_type = "crypto"  # Default to crypto
-        symbols = SETTINGS.symbols_crypto
+        symbols = symbols_crypto
         try:
             if loop:
                 loop.run_until_complete(run_live_crypto_trading(symbols, asset_type))
